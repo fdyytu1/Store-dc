@@ -94,6 +94,49 @@ class AdminCog(commands.Cog):
         await self.admin_service.cleanup()
         self.logger.info("AdminCog unloaded")
 
+    # Tambahkan methods berikut di AdminService
+    
+    async def get_system_stats(self) -> Dict:
+        """Get system statistics"""
+        try:
+            # System info
+            cpu_usage = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            # Bot info
+            uptime = datetime.now(timezone.utc) - self.bot.start_time
+            
+            stats = {
+                'os': f"{platform.system()} {platform.release()}",
+                'cpu_usage': cpu_usage,
+                'memory_used': memory.used/1024/1024/1024,
+                'memory_total': memory.total/1024/1024/1024,
+                'memory_percent': memory.percent,
+                'disk_used': disk.used/1024/1024/1024,
+                'disk_total': disk.total/1024/1024/1024,
+                'disk_percent': disk.percent,
+                'python_version': platform.python_version(),
+                'uptime': uptime,
+                'latency': round(self.bot.latency * 1000),
+                'servers': len(self.bot.guilds),
+                'commands': len(self.bot.commands),
+                'cache_stats': await self.cache_manager.get_stats()
+            }
+            
+            return self.success_response(stats)
+        except Exception as e:
+            self.logger.error(f"Error getting system stats: {e}")
+            return self.error_response(str(e))
+    
+    async def check_admin_permission(self, user_id: int) -> bool:
+        """Check if user has admin permission"""
+        try:
+            return self.success_response(user_id == self.bot.config['admin_id'])
+        except Exception as e:
+            self.logger.error(f"Error checking admin permission: {e}")
+            return self.error_response(str(e))
+
 async def setup(bot):
     """Setup AdminService with different loading flag"""
     if not hasattr(bot, 'admin_service_loaded'):
