@@ -33,7 +33,7 @@ from ext.constants import (
 from ext.admin_service import AdminService
 from ext.balance_manager import BalanceManagerService
 from ext.product_manager import ProductManagerService
-from ext.transaction_manager import TransactionManager
+from ext.trx import TransactionManager
 from ext.cache_manager import CacheManager
 from ext.base_handler import BaseLockHandler, BaseResponseHandler
 
@@ -74,9 +74,8 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Check if user has admin permission"""
-        result = await self.admin_service.check_admin_permission(ctx.author.id)
-        return result.success and result.data
-
+        return str(ctx.author.id) == str(self.admin_id)
+        
     @commands.command(name="addproduct")
     async def add_product(self, ctx, code: str, name: str, price: int, *, description: str = None):
         """Add new product"""
