@@ -411,7 +411,11 @@ class BUTTON_IDS:
     CONFIRM_PURCHASE = "confirm_purchase"
     CANCEL_PURCHASE = "cancel_purchase"
     HISTORY = "history"
-    
+    # Ticket Buttons
+    TICKET_CREATE = "create_ticket"       # Tambahkan ini
+    TICKET_CLOSE = "close_ticket"         # Tambahkan ini
+    TICKET_REOPEN = "reopen_ticket"       # Tambahkan ini
+    TICKET_CLAIM = "claim_ticket"         # Tambahkan ini
     @classmethod
     def get_purchase_confirmation_id(cls, product_code: str) -> str:
         """Generate ID untuk konfirmasi pembelian"""
