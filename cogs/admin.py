@@ -36,6 +36,7 @@ from ext.product_manager import ProductManagerService
 from ext.trx import TransactionManager
 from ext.cache_manager import CacheManager
 from ext.base_handler import BaseLockHandler, BaseResponseHandler
+from utils.command_handler import AdvancedCommandHandler
 
 class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
     def __init__(self, bot):
@@ -43,7 +44,8 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
         self.bot = bot
         self.logger = logging.getLogger("AdminCog")
         self.PREFIX = "!"
-
+        self.command_handler = AdvancedCommandHandler(bot)
+        
         # Initialize services with proper error handling
         try:
             self.admin_service = AdminService(bot)
@@ -71,7 +73,28 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
         except Exception as e:
             self.logger.critical(f"Failed to load admin configuration: {e}")
             raise
-
+    async def _process_command(self, ctx: commands.Context, command_name: str, execute_func) -> None:
+        """Process command dengan error handling dan locking"""
+        if not await self.acquire_response_lock(ctx):
+            return
+    
+        try:
+            await execute_func()
+            await self.command_handler.handle_command(ctx, command_name)
+        except Exception as e:
+            self.logger.error(f"Error executing {command_name}: {str(e)}")
+            error_msg = str(e) if isinstance(e, ValueError) else "An error occurred while processing the command"
+            await self.send_response_once(
+                ctx,
+                embed=discord.Embed(
+                    title="❌ Error",
+                    description=error_msg,
+                    color=COLORS.ERROR
+                )
+            )
+        finally:
+            self.release_response_lock(ctx)
+        
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Check if user has admin permission"""
         return str(ctx.author.id) == str(self.admin_id)
