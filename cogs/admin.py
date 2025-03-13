@@ -1,13 +1,14 @@
 """
 Admin Commands Cog
-Author: fdyytu
+Author: fdyytu1
 Created at: 2025-03-12 14:08:55 UTC
+Last Modified: 2025-03-13 01:25:43 UTC
 """
 
 import discord
 from discord.ext import commands
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import asyncio
 from typing import Optional, List, Dict, Any
@@ -27,11 +28,12 @@ from ext.constants import (
     VALID_STOCK_FORMATS,
     Permissions 
 )
+
+# Import services
 from ext.admin_service import AdminService
 from ext.balance_manager import BalanceManagerService
 from ext.product_manager import ProductManagerService
-from ext.trx import TransactionManager
-from ext.database import get_connection
+from ext.transaction_manager import TransactionManager
 from ext.cache_manager import CacheManager
 from ext.base_handler import BaseLockHandler, BaseResponseHandler
 
@@ -41,15 +43,23 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
         self.bot = bot
         self.logger = logging.getLogger("AdminCog")
         self.PREFIX = "!"
-        
-        # Initialize services
-        self.balance_service = BalanceManagerService(bot)
-        self.product_service = ProductManagerService(bot)
-        self.trx_manager = TransactionManager(bot)
-        self.admin_service = AdminService(bot)
-        self.cache_manager = CacheManager()
-        
+
+        # Initialize services with proper error handling
+        try:
+            self.admin_service = AdminService(bot)
+            self.balance_service = BalanceManagerService(bot)
+            self.product_service = ProductManagerService(bot)
+            self.trx_manager = TransactionManager(bot)
+            self.cache_manager = CacheManager()
+        except Exception as e:
+            self.logger.critical(f"Failed to initialize services: {e}")
+            raise
+
         # Load admin configuration
+        self._load_config()
+
+    def _load_config(self):
+        """Load configuration with proper error handling"""
         try:
             with open('config.json') as f:
                 config = json.load(f)
@@ -64,9 +74,9 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
 
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Check if user has admin permission"""
-        return await self.admin_service.check_permission(ctx.author.id, Permissions.ADMIN)
+        result = await self.admin_service.check_admin_permission(ctx.author.id)
+        return result.success and result.data
 
-    # Product Management Commands
     @commands.command(name="addproduct")
     async def add_product(self, ctx, code: str, name: str, price: int, *, description: str = None):
         """Add new product"""
@@ -85,7 +95,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             embed = discord.Embed(
                 title="✅ Product Added",
                 color=COLORS.SUCCESS,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.add_field(
@@ -135,7 +145,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             embed = discord.Embed(
                 title="✅ Product Updated",
                 color=COLORS.SUCCESS,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.add_field(
@@ -177,7 +187,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 title="✅ Product Deleted",
                 description=f"Product {code.upper()} has been deleted",
                 color=COLORS.SUCCESS,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.set_footer(text=f"Deleted by {ctx.author}")
@@ -214,7 +224,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             embed = discord.Embed(
                 title="✅ Stock Added",
                 color=COLORS.SUCCESS,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.add_field(
@@ -250,7 +260,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             embed = discord.Embed(
                 title="✅ World Added",
                 color=COLORS.SUCCESS,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.add_field(
@@ -269,7 +279,6 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             
         await self._process_command(ctx, "addworld", execute)
 
-    # Balance Management Commands
     @commands.command(name="addbal")
     async def add_balance(self, ctx, growid: str, amount: int, currency: str):
         """Add balance to user"""
@@ -277,27 +286,27 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             currency = currency.upper()
             if currency not in CURRENCY_RATES:
                 raise ValueError(f"Invalid currency. Use: {', '.join(CURRENCY_RATES.keys())}")
-
+            
             if amount <= 0:
                 raise ValueError("Amount must be positive!")
 
-            # Convert to WLS based on currency
             wls = amount if currency == "WL" else amount * CURRENCY_RATES[currency]
-
+            
             response = await self.balance_service.update_balance(
                 growid=growid,
-                wl=wls,
+                amount=wls,
+                currency="WL",
                 details=f"Added by admin {ctx.author}",
                 transaction_type=TransactionType.ADMIN_ADD
             )
-
+            
             if not response.success:
                 raise ValueError(response.error)
-
+                
             embed = discord.Embed(
                 title="✅ Balance Added",
                 color=COLORS.SUCCESS,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.add_field(
@@ -311,10 +320,10 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 ),
                 inline=False
             )
+            
             embed.set_footer(text=f"Added by {ctx.author}")
-
             await self.send_response_once(ctx, embed=embed)
-
+            
         await self._process_command(ctx, "addbal", execute)
 
     @commands.command(name="removebal")
@@ -324,27 +333,27 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             currency = currency.upper()
             if currency not in CURRENCY_RATES:
                 raise ValueError(f"Invalid currency. Use: {', '.join(CURRENCY_RATES.keys())}")
-
+            
             if amount <= 0:
                 raise ValueError("Amount must be positive!")
 
-            # Convert to negative WLS based on currency
             wls = -(amount if currency == "WL" else amount * CURRENCY_RATES[currency])
-
+            
             response = await self.balance_service.update_balance(
                 growid=growid,
-                wl=wls,
+                amount=wls,
+                currency="WL",
                 details=f"Removed by admin {ctx.author}",
                 transaction_type=TransactionType.ADMIN_REMOVE
             )
-
+            
             if not response.success:
                 raise ValueError(response.error)
-
+                
             embed = discord.Embed(
                 title="✅ Balance Removed",
                 color=COLORS.SUCCESS,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.add_field(
@@ -358,10 +367,10 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 ),
                 inline=False
             )
+            
             embed.set_footer(text=f"Removed by {ctx.author}")
-
             await self.send_response_once(ctx, embed=embed)
-
+            
         await self._process_command(ctx, "removebal", execute)
 
     @commands.command(name="checkbal")
@@ -373,12 +382,15 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 raise ValueError(balance_response.error)
 
             # Get transaction history
-            trx_response = await self.trx_manager.get_transaction_history(growid, limit=5)
+            trx_response = await self.trx_manager.get_transaction_history(
+                growid=growid,
+                limit=5
+            )
 
             embed = discord.Embed(
                 title=f"👤 User Information - {growid}",
                 color=COLORS.INFO,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.add_field(
@@ -400,7 +412,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
 
             embed.set_footer(text=f"Checked by {ctx.author}")
             await self.send_response_once(ctx, embed=embed)
-
+            
         await self._process_command(ctx, "checkbal", execute)
 
     @commands.command(name="resetuser")
@@ -408,52 +420,41 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
         """Reset user balance"""
         async def execute():
             if not await self._confirm_action(
-                ctx, 
+                ctx,
                 f"Are you sure you want to reset {growid}'s balance? This action cannot be undone."
             ):
                 raise ValueError("Operation cancelled by user")
 
-            current_balance = await self.balance_service.get_balance(growid)
-            if not current_balance.success:
-                raise ValueError(current_balance.error)
-
-            # Reset balance
-            response = await self.balance_service.update_balance(
+            response = await self.balance_service.reset_balance(
                 growid=growid,
-                wl=-current_balance.data.wl,
-                dl=-current_balance.data.dl,
-                bgl=-current_balance.data.bgl,
-                details=f"Balance reset by admin {ctx.author}",
-                transaction_type=TransactionType.ADMIN_RESET
+                reset_by=str(ctx.author)
             )
 
             if not response.success:
                 raise ValueError(response.error)
-
+                
             embed = discord.Embed(
                 title="✅ Balance Reset",
-                color=COLORS.ERROR,
-                timestamp=datetime.utcnow()
+                color=COLORS.SUCCESS,
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.add_field(
                 name="Previous Balance",
-                value=f"```yml\n{current_balance.data.format()}\n```",
+                value=f"```yml\n{response.data['previous_balance'].format()}\n```",
                 inline=False
             )
             
             embed.add_field(
                 name="New Balance",
-                value=f"```yml\n{response.data.format()}\n```",
+                value=f"```yml\n{response.data['new_balance'].format()}\n```",
                 inline=False
             )
-            
             embed.set_footer(text=f"Reset by {ctx.author}")
             await self.send_response_once(ctx, embed=embed)
-
+            
         await self._process_command(ctx, "resetuser", execute)
 
-    # Transaction Management Commands
     @commands.command(name="trxhistory")
     async def transaction_history(self, ctx, growid: str, limit: int = 10):
         """View transaction history"""
@@ -461,22 +462,22 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             if limit < 1 or limit > 50:
                 raise ValueError("Limit must be between 1 and 50")
 
-            trx_response = await self.trx_manager.get_transaction_history(
+            response = await self.trx_manager.get_transaction_history(
                 growid=growid,
                 limit=limit
             )
 
-            if not trx_response.success:
-                raise ValueError(trx_response.error)
+            if not response.success:
+                raise ValueError(response.error)
 
-            transactions = trx_response.data
+            transactions = response.data
             if not transactions:
                 raise ValueError("No transactions found")
 
             embed = discord.Embed(
                 title=f"📜 Transaction History - {growid}",
                 color=COLORS.INFO,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
 
             for tx in transactions:
@@ -493,7 +494,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
 
             embed.set_footer(text=f"Showing {len(transactions)} transactions")
             await self.send_response_once(ctx, embed=embed)
-
+            
         await self._process_command(ctx, "trxhistory", execute)
 
     @commands.command(name="stockhistory")
@@ -518,7 +519,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             embed = discord.Embed(
                 title=f"📦 Stock History - {code.upper()}",
                 color=COLORS.INFO,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
 
             for entry in history:
@@ -536,10 +537,9 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
 
             embed.set_footer(text=f"Showing {len(history)} entries")
             await self.send_response_once(ctx, embed=embed)
-
+            
         await self._process_command(ctx, "stockhistory", execute)
 
-    # System Management Commands
     @commands.command(name="systeminfo")
     async def system_info(self, ctx):
         """Show bot system information"""
@@ -550,12 +550,12 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             disk = psutil.disk_usage('/')
             
             # Get bot info
-            uptime = datetime.utcnow() - self.bot.startup_time
+            uptime = datetime.now(timezone.utc) - self.bot.start_time
             
             embed = discord.Embed(
                 title="🤖 System Information",
                 color=COLORS.INFO,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             # System Stats
@@ -593,16 +593,16 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 name="📊 Cache Statistics",
                 value=(
                     f"```yml\n"
-                    f"Items: {cache_stats.get('items', 0)}\n"
-                    f"Hit Rate: {cache_stats.get('hit_rate', 0):.1f}%\n"
-                    f"Memory Usage: {cache_stats.get('memory_usage', 0):.1f}MB\n"
+                    f"Items: {cache_stats['items']}\n"
+                    f"Hit Rate: {cache_stats['hit_rate']:.1f}%\n"
+                    f"Memory Usage: {cache_stats['memory_usage']:.1f}MB\n"
                     f"```"
                 ),
                 inline=False
             )
             
             await self.send_response_once(ctx, embed=embed)
-
+            
         await self._process_command(ctx, "systeminfo", execute)
 
     @commands.command(name="maintenance")
@@ -633,31 +633,14 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 title="🔧 Maintenance Mode",
                 description=f"Maintenance mode has been turned **{mode_lower.upper()}**",
                 color=COLORS.WARNING if enabled else COLORS.SUCCESS,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.set_footer(text=f"Changed by {ctx.author}")
             await self.send_response_once(ctx, embed=embed)
 
             if enabled:
-                # Notify online users
-                for guild in self.bot.guilds:
-                    for member in guild.members:
-                        if not member.bot and member.status != discord.Status.offline:
-                            try:
-                                await member.send(
-                                    embed=discord.Embed(
-                                        title="⚠️ Maintenance Mode",
-                                        description=(
-                                            "The bot is entering maintenance mode. "
-                                            "Some features may be unavailable. "
-                                            "We'll notify you when service is restored."
-                                        ),
-                                        color=COLORS.WARNING
-                                    )
-                                )
-                            except Exception as e:
-                                self.logger.error(f"Failed to notify member {member.id}: {e}")
+                await self._notify_maintenance(ctx)
 
         await self._process_command(ctx, "maintenance", execute)
 
@@ -697,7 +680,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                     f"the blacklist."
                 ),
                 color=COLORS.ERROR if action_lower == 'add' else COLORS.SUCCESS,
-                timestamp=datetime.utcnow()
+                timestamp=datetime.now(timezone.utc)
             )
             
             embed.set_footer(text=f"Updated by {ctx.author}")
@@ -705,7 +688,26 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
 
         await self._process_command(ctx, "blacklist", execute)
 
-    # Helper Methods
+    async def _notify_maintenance(self, ctx):
+        """Notify online users about maintenance mode"""
+        for guild in self.bot.guilds:
+            for member in guild.members:
+                if not member.bot and member.status != discord.Status.offline:
+                    try:
+                        await member.send(
+                            embed=discord.Embed(
+                                title="⚠️ Maintenance Mode",
+                                description=(
+                                    "The bot is entering maintenance mode. "
+                                    "Some features may be unavailable. "
+                                    "We'll notify you when service is restored."
+                                ),
+                                color=COLORS.WARNING
+                            )
+                        )
+                    except Exception as e:
+                        self.logger.error(f"Failed to notify member {member.id}: {e}")
+
     async def _confirm_action(self, ctx: commands.Context, message: str) -> bool:
         """Ask for confirmation before proceeding with action"""
         embed = discord.Embed(
@@ -739,7 +741,7 @@ async def setup(bot):
     try:
         await bot.add_cog(AdminCog(bot))
         logging.info(
-            f'Admin cog loaded successfully at {datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC'
+            f'Admin cog loaded successfully at {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")} UTC'
         )
     except Exception as e:
         logging.error(f"Failed to load Admin cog: {e}")
