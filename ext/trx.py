@@ -567,13 +567,13 @@ class TransactionManager(BaseLockHandler):
                     
                     if product_code in product_cache:
                         product = product_cache[product_code]
+                                        else:
+                    product_response = await self.product_manager.get_product(product_code)
+                    if product_response.success:
+                        product = product_response.data
+                        product_cache[product_code] = product
                     else:
-                        product_response = await self.product_manager.get_product(product_code)
-                        if product_response and isinstance(product_response, dict):
-                            product = product_response
-                            product_cache[product_code] = product
-                        else:
-                            product = None
+                        product = None
     
                     if product:
                         formatted_trx['product_name'] = product.get('name', 'Unknown Product')
