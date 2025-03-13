@@ -1,23 +1,23 @@
 """
 Admin Service for Store DC Bot
-Author: fdyyuk
+Author: fdyytu1
 Created at: 2025-03-09 02:20:30 UTC
+Last Modified: 2025-03-13 01:49:49 UTC
 """
 import logging
 import asyncio
-from typing import Optional, Dict
-from datetime import datetime
+from typing import Dict, Optional
+from datetime import datetime, timezone
+import platform
+import psutil
 
 import discord
 from discord.ext import commands
-from discord import ui
-from typing import Dict, Optional
-from datetime import datetime
 
-from .base_handler import BaseLockHandler
+from .base_handler import BaseLockHandler, BaseResponseHandler
 from .cache_manager import CacheManager
 
-class AdminService(BaseLockHandler):
+class AdminService(BaseLockHandler, BaseResponseHandler):
     _instance = None
     _instance_lock = asyncio.Lock()
 
@@ -35,11 +35,31 @@ class AdminService(BaseLockHandler):
             self.cache_manager = CacheManager()
             self.maintenance_mode = False
             self.initialized = True
-
+    def success_response(self, data: any) -> Dict:
+        """Create success response"""
+        return {
+            'success': True,
+            'data': data,
+            'error': None
+        }
+    
+    def error_response(self, error: str) -> Dict:
+        """Create error response"""
+        return {
+            'success': False,
+            'data': None,
+            'error': error
+        }
     async def verify_dependencies(self) -> bool:
         """Verify all required dependencies are available"""
         try:
-            # Verify database connection
+            # Verify admin_id exists in config
+            if not hasattr(self.bot, 'config'):
+                raise ValueError("Bot config not found")
+                
+            if 'admin_id' not in self.bot.config:
+                raise ValueError("Admin ID not configured")
+                
             return True
         except Exception as e:
             self.logger.error(f"Failed to verify dependencies: {e}")
@@ -50,52 +70,49 @@ class AdminService(BaseLockHandler):
         try:
             cached = await self.cache_manager.get('maintenance_mode')
             if cached is not None:
-                return cached
+                return cached.get('enabled', False)
             return self.maintenance_mode
         except Exception as e:
             self.logger.error(f"Error checking maintenance mode: {e}")
             return False
 
-    async def set_maintenance_mode(self, enabled: bool) -> bool:
+    async def set_maintenance_mode(self, enabled: bool, reason: str = None, admin: str = None) -> Dict:
         """Set maintenance mode status"""
         try:
             self.maintenance_mode = enabled
+            maintenance_data = {
+                'enabled': enabled,
+                'reason': reason,
+                'admin': admin,
+                'timestamp': datetime.now(timezone.utc).isoformat()
+            }
+            
             await self.cache_manager.set(
                 'maintenance_mode',
-                enabled,
+                maintenance_data,
                 expires_in=86400  # 24 hours
             )
-            return True
+            
+            return self.success_response(maintenance_data)
         except Exception as e:
             self.logger.error(f"Error setting maintenance mode: {e}")
-            return False
+            return self.error_response(str(e))
 
-    async def cleanup(self):
-        """Cleanup resources"""
+    async def check_admin_permission(self, user_id: int) -> Dict:
+        """Check if user has admin permission"""
         try:
-            await self.cache_manager.delete('maintenance_mode')
-            self.logger.info("AdminService cleanup completed")
+            if not hasattr(self.bot, 'config'):
+                return self.error_response("Bot config not found")
+                
+            admin_id = self.bot.config.get('admin_id')
+            if not admin_id:
+                return self.error_response("Admin ID not configured")
+                
+            return self.success_response(str(user_id) == str(admin_id))
         except Exception as e:
-            self.logger.error(f"Error during cleanup: {e}")
-# ... (kode sebelumnya tetap sama)
+            self.logger.error(f"Error checking admin permission: {e}")
+            return self.error_response(str(e))
 
-class AdminCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        self.admin_service = AdminService(bot)
-        self.logger = logging.getLogger("AdminCog")
-
-    async def cog_load(self):
-        """Called when cog is loaded"""
-        self.logger.info("AdminCog loading...")
-
-    async def cog_unload(self):
-        """Called when cog is unloaded"""
-        await self.admin_service.cleanup()
-        self.logger.info("AdminCog unloaded")
-
-    # Tambahkan methods berikut di AdminService
-    
     async def get_system_stats(self) -> Dict:
         """Get system statistics"""
         try:
@@ -117,7 +134,7 @@ class AdminCog(commands.Cog):
                 'disk_total': disk.total/1024/1024/1024,
                 'disk_percent': disk.percent,
                 'python_version': platform.python_version(),
-                'uptime': uptime,
+                'uptime': str(uptime).split('.')[0],
                 'latency': round(self.bot.latency * 1000),
                 'servers': len(self.bot.guilds),
                 'commands': len(self.bot.commands),
@@ -128,17 +145,17 @@ class AdminCog(commands.Cog):
         except Exception as e:
             self.logger.error(f"Error getting system stats: {e}")
             return self.error_response(str(e))
-    
-    async def check_admin_permission(self, user_id: int) -> bool:
-        """Check if user has admin permission"""
+
+    async def cleanup(self):
+        """Cleanup resources"""
         try:
-            return self.success_response(user_id == self.bot.config['admin_id'])
+            await self.cache_manager.delete('maintenance_mode')
+            self.logger.info("AdminService cleanup completed")
         except Exception as e:
-            self.logger.error(f"Error checking admin permission: {e}")
-            return self.error_response(str(e))
+            self.logger.error(f"Error during cleanup: {e}")
 
 async def setup(bot):
-    """Setup AdminService with different loading flag"""
+    """Setup AdminService"""
     if not hasattr(bot, 'admin_service_loaded'):
         try:
             # Initialize AdminService
