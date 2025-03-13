@@ -2,7 +2,7 @@
 Admin Commands Cog
 Author: fdyytu1
 Created at: 2025-03-12 14:08:55 UTC
-Last Modified: 2025-03-13 01:25:43 UTC
+Last Modified: 2025-03-13 16:07:00 UTC
 """
 
 import discord
@@ -73,6 +73,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
         except Exception as e:
             self.logger.critical(f"Failed to load admin configuration: {e}")
             raise
+
     async def _process_command(self, ctx: commands.Context, command_name: str, execute_func) -> None:
         """Process command dengan error handling dan locking"""
         if not await self.acquire_response_lock(ctx):
@@ -103,12 +104,11 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
     async def add_product(self, ctx, code: str, name: str, price: int, *, description: str = None):
         """Add new product"""
         async def execute():
-            response = await self.product_service.add_product(
+            response = await self.product_service.create_product(
                 code=code.upper(),
                 name=name,
                 price=price,
-                description=description,
-                added_by=str(ctx.author)
+                description=description
             )
             
             if not response.success:
@@ -234,15 +234,27 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             content = await attachment.read()
             content = content.decode('utf-8').strip().split('\n')
             
-            response = await self.product_service.add_stock(
-                code=code.upper(),
-                items=content,
-                added_by=str(ctx.author)
-            )
+            # Process each stock item
+            added_count = 0
+            failed_items = []
             
-            if not response.success:
-                raise ValueError(response.error)
+            for item in content:
+                response = await self.product_service.add_stock_item(
+                    product_code=code.upper(),
+                    content=item.strip(),
+                    added_by=str(ctx.author)
+                )
                 
+                if response.success:
+                    added_count += 1
+                else:
+                    failed_items.append(f"{item}: {response.error}")
+            
+            # Get current stock count
+            stock_count = await self.product_service.get_stock_count(code.upper())
+            if not stock_count.success:
+                raise ValueError(stock_count.error)
+            
             embed = discord.Embed(
                 title="✅ Stock Added",
                 color=COLORS.SUCCESS,
@@ -250,16 +262,27 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             )
             
             embed.add_field(
-                name="Details",
+                name="Summary",
                 value=(
                     f"```yml\n"
                     f"Product: {code.upper()}\n"
-                    f"Added Items: {len(content)}\n"
-                    f"Total Stock: {response.data['total_stock']}\n"
+                    f"Successfully Added: {added_count}/{len(content)}\n"
+                    f"Current Total Stock: {stock_count.data}\n"
                     f"```"
                 ),
                 inline=False
             )
+            
+            if failed_items:
+                failed_text = "\n".join(failed_items[:5])  # Show first 5 failures
+                if len(failed_items) > 5:
+                    failed_text += f"\n... and {len(failed_items) - 5} more"
+                
+                embed.add_field(
+                    name="Failed Items",
+                    value=f"```\n{failed_text}\n```",
+                    inline=False
+                )
             
             embed.set_footer(text=f"Added by {ctx.author}")
             await self.send_response_once(ctx, embed=embed)
@@ -268,19 +291,19 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
 
     @commands.command(name="addworld")
     async def add_world(self, ctx, name: str, *, description: str = None):
-        """Add world information"""
+        """Add/Update world information"""
         async def execute():
-            response = await self.product_service.add_world(
-                name=name.upper(),
-                description=description,
-                added_by=str(ctx.author)
+            response = await self.product_service.update_world_info(
+                world=name.upper(),
+                owner=str(ctx.author),
+                bot=str(self.bot.user)
             )
             
             if not response.success:
                 raise ValueError(response.error)
                 
             embed = discord.Embed(
-                title="✅ World Added",
+                title="✅ World Updated",
                 color=COLORS.SUCCESS,
                 timestamp=datetime.now(timezone.utc)
             )
@@ -290,13 +313,14 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 value=(
                     f"```yml\n"
                     f"World: {name.upper()}\n"
-                    f"Description: {description or 'N/A'}\n"
+                    f"Owner: {ctx.author}\n"
+                    f"Bot: {self.bot.user}\n"
                     f"```"
                 ),
                 inline=False
             )
             
-            embed.set_footer(text=f"Added by {ctx.author}")
+            embed.set_footer(text=f"Updated by {ctx.author}")
             await self.send_response_once(ctx, embed=embed)
             
         await self._process_command(ctx, "addworld", execute)
@@ -545,11 +569,17 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             )
 
             for entry in history:
+                status_emoji = {
+                    Status.AVAILABLE.value: "🟢",
+                    Status.SOLD.value: "💰",
+                    Status.DELETED.value: "🗑️"
+                }.get(entry['status'], "❓")
+                
                 embed.add_field(
-                    name=f"{entry['action']} - {entry['timestamp']}",
+                    name=f"{status_emoji} {entry['action']} - {entry['timestamp']}",
                     value=(
                         f"```yml\n"
-                        f"Amount: {entry['amount']}\n"
+                        f"Status: {entry['status']}\n"
                         f"By: {entry['by']}\n"
                         f"Details: {entry.get('details', 'No details')}\n"
                         f"```"
@@ -557,10 +587,11 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                     inline=False
                 )
 
-            embed.set_footer(text=f"Showing {len(history)} entries")
+            embed.set_footer(text=f"Showing {len(history)} entries • Current time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
             await self.send_response_once(ctx, embed=embed)
             
         await self._process_command(ctx, "stockhistory", execute)
+
 
     @commands.command(name="systeminfo")
     async def system_info(self, ctx):
