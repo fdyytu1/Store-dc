@@ -503,7 +503,7 @@ class ShopView(View):
                 raise ValueError(MESSAGES.INFO['MAINTENANCE'])
                 
             # Gunakan ProductManager untuk get world info
-            world_response = await self.product_manager.get_world_info()
+            world_response = await self.product_service.get_world_info()
             if not world_response.success:
                 raise ValueError(world_response.error or MESSAGES.ERROR['WORLD_INFO_FAILED'])
                 
