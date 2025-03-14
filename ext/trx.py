@@ -565,17 +565,17 @@ class TransactionManager(BaseLockHandler):
                 if trx['type'] == TransactionType.PURCHASE.value and 'product_code' in trx:
                     product_code = trx['product_code']
                     
-                    if product_code in product_cache:
+                if product_code in product_cache:
                         product = product_cache[product_code]
-                                        else:
+                else:
                     product_response = await self.product_manager.get_product(product_code)
-                    if product_response.success:
+                if product_response.success:
                         product = product_response.data
                         product_cache[product_code] = product
-                    else:
+                else:
                         product = None
     
-                    if product:
+                if product:
                         formatted_trx['product_name'] = product.get('name', 'Unknown Product')
                         formatted_trx['product_price'] = product.get('price', 0)
     
