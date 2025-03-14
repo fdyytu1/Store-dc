@@ -214,24 +214,26 @@ class ProductSelect(Select):
             )
 
 class RegisterModal(Modal):
-    def __init__(self):
-        super().__init__(title="📝 Pendaftaran GrowID")
-
+    def __init__(self, existing_growid=None):
+        title = "📝 Update GrowID" if existing_growid else "📝 Pendaftaran GrowID"
+        super().__init__(title=title)
+        
         self.growid = TextInput(
             label="Masukkan GrowID Anda",
-            placeholder="Contoh: GROW_ID",
+            placeholder=f"GrowID saat ini: {existing_growid}" if existing_growid else "Contoh: GROW_ID",
             min_length=3,
             max_length=30,
             required=True
         )
         self.add_item(self.growid)
+        self.existing_growid = existing_growid
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         try:
             balance_service = BalanceManagerService(interaction.client)
 
-            growid = str(self.growid.value).strip().upper()
+            growid = str(self.growid.value).strip()
             if not growid or len(growid) < 3:
                 raise ValueError(MESSAGES.ERROR['INVALID_GROWID'])
 
@@ -243,9 +245,16 @@ class RegisterModal(Modal):
             if not register_response.success:
                 raise ValueError(register_response.error)
 
+            # Buat pesan yang sesuai berdasarkan operasi
+            title = "✅ GrowID Diperbarui" if self.existing_growid else "✅ Pendaftaran Berhasil"
+            if self.existing_growid:
+                description = f"GrowID berhasil diperbarui!\nGrowID Lama: {self.existing_growid}\nGrowID Baru: {growid}"
+            else:
+                description = MESSAGES.SUCCESS['REGISTRATION'].format(growid=growid)
+
             success_embed = discord.Embed(
-                title="✅ Berhasil",
-                description=MESSAGES.SUCCESS['REGISTRATION'].format(growid=growid),
+                title=title,
+                description=description,
                 color=COLORS.SUCCESS
             )
             await interaction.followup.send(embed=success_embed, ephemeral=True)
@@ -310,7 +319,7 @@ class ShopView(View):
 
     @discord.ui.button(
         style=discord.ButtonStyle.primary,
-        label="📝 Daftar",
+        label="📝 Daftar/Update",  # Update label
         custom_id=BUTTON_IDS.REGISTER
     )
     async def register_callback(self, interaction: discord.Interaction, button: Button):
@@ -324,27 +333,21 @@ class ShopView(View):
                 ephemeral=True
             )
             return
-
+    
         try:
             # Check maintenance mode
             if await self.admin_service.is_maintenance_mode():
                 raise ValueError(MESSAGES.INFO['MAINTENANCE'])
-
+    
+            # Cek GrowID yang sudah ada
             growid_response = await self.balance_service.get_growid(str(interaction.user.id))
+            existing_growid = None
             if growid_response.success and growid_response.data:
-                await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="❌ Sudah Terdaftar",
-                        description=f"Anda sudah terdaftar dengan GrowID: `{growid_response.data}`",
-                        color=COLORS.ERROR
-                    ),
-                    ephemeral=True
-                )
-                return
-
-            modal = RegisterModal()
+                existing_growid = growid_response.data
+    
+            modal = RegisterModal(existing_growid=existing_growid)
             await interaction.response.send_modal(modal)
-
+    
         except ValueError as e:
             if not interaction.response.is_done():
                 await interaction.response.send_message(
@@ -782,7 +785,74 @@ class ShopView(View):
             await interaction.followup.send(embed=error_embed, ephemeral=True)
         finally:
             self._release_interaction_lock(str(interaction.id))
-
+            
+    @discord.ui.button(
+        style=discord.ButtonStyle.secondary,
+        label="🔍 Check GrowID",
+        custom_id=BUTTON_IDS.CHECK_GROWID
+    )
+    async def check_growid_callback(self, interaction: discord.Interaction, button: Button):
+        if not await self._acquire_interaction_lock(str(interaction.id)):
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="⏳ Mohon Tunggu",
+                    description=MESSAGES.INFO['COOLDOWN'],
+                    color=COLORS.WARNING
+                ),
+                ephemeral=True
+            )
+            return
+    
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            # Check maintenance mode
+            if await self.admin_service.is_maintenance_mode():
+                raise ValueError(MESSAGES.INFO['MAINTENANCE'])
+    
+            growid_response = await self.balance_service.get_growid(str(interaction.user.id))
+            if not growid_response.success:
+                raise ValueError(growid_response.error)
+    
+            growid = growid_response.data
+            if not growid:
+                raise ValueError(MESSAGES.ERROR['NOT_REGISTERED'])
+    
+            embed = discord.Embed(
+                title="🔍 Informasi GrowID",
+                description=f"GrowID yang terdaftar: `{growid}`",
+                color=COLORS.INFO
+            )
+    
+            embed.add_field(
+                name="Status Pendaftaran",
+                value="✅ Terdaftar",
+                inline=False
+            )
+    
+            embed.set_footer(text="Gunakan tombol 'Daftar/Update' untuk mengubah GrowID")
+            embed.timestamp = datetime.utcnow()
+    
+            await interaction.followup.send(embed=embed, ephemeral=True)
+    
+        except ValueError as e:
+            error_embed = discord.Embed(
+                title="❌ Error",
+                description=str(e),
+                color=COLORS.ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+        except Exception as e:
+            self.logger.error(f"Error in check growid callback: {e}")
+            error_embed = discord.Embed(
+                title="❌ Error",
+                description=MESSAGES.ERROR['REGISTRATION_FAILED'],
+                color=COLORS.ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+        finally:
+            self._release_interaction_lock(str(interaction.id))
+        
 class LiveButtonManager(BaseLockHandler):
     def __init__(self, bot):
         if not hasattr(self, 'initialized') or not self.initialized:
