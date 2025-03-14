@@ -9,7 +9,7 @@ import logging
 import asyncio
 from typing import Dict, List, Optional, Callable, Any
 from datetime import datetime
-
+import hashlib
 import discord
 from discord.ext import commands
 
