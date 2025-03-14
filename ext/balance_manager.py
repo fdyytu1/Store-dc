@@ -239,9 +239,9 @@ class BalanceManagerService(BaseLockHandler):
             conn = get_connection()
             cursor = conn.cursor()
             
-            # Check for existing GrowID
+            # Check for existing GrowID - make case insensitive
             cursor.execute(
-                "SELECT growid FROM users WHERE growid = ? COLLATE binary",
+                "SELECT growid FROM users WHERE LOWER(growid) = LOWER(?) COLLATE NOCASE",
                 (growid,)
             )
             existing = cursor.fetchone()
