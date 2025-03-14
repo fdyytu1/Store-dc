@@ -272,8 +272,8 @@ class Stock:
     ALERT_THRESHOLD = 10
     MAX_STOCK = 999999
     MIN_STOCK = 0
-    MIN_PRICE = 1  # Tambahkan ini
-    MAX_PRICE = 1000000  # Tambahkan ini juga untuk batas atas
+    MIN_PRICE = 1
+    MAX_PRICE = 999999999  # atau sesuai
     
 # Discord Colors
 class COLORS:
