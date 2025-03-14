@@ -5,6 +5,7 @@ import json
 from datetime import datetime
 from typing import Optional, Dict, List, Tuple, Any
 from ext.cache_manager import CacheManager
+from ext.base_handler import BaseResponseHandler
 
 logger = logging.getLogger(__name__)
 
@@ -96,11 +97,11 @@ class CommandAnalytics:
             permanent=True
         )
 
-class AdvancedCommandHandler:
+class AdvancedCommandHandler(BaseResponseHandler):
     def __init__(self, bot: commands.Bot):
+        super().__init__()  # Initialize BaseResponseHandler
         self.bot = bot
         self.analytics = CommandAnalytics()
-        self.cache_manager = CacheManager()
         
         # Load config dengan error handling yang lebih baik
         try:
@@ -254,6 +255,74 @@ class AdvancedCommandHandler:
         
         return has_permission
 
+    async def handle_command(self, ctx: commands.Context, command_name: str) -> None:
+        """Handle command dengan sistem anti-duplikasi response dan error handling"""
+        # Check if command exists
+        command = self.bot.get_command(command_name)
+        if not command:
+            logger.error(f"Command not found: {command_name}")
+            return
+
+        try:
+            # Rate Limit Check
+            if not await self.check_rate_limit(ctx):
+                success, error = await self.send_response_once(
+                    ctx,
+                    content="🚫 You're sending commands too fast! Please slow down.",
+                    delete_after=5
+                )
+                if not success:
+                    logger.warning(f"Failed to send rate limit message: {error}")
+                return
+                
+            # Permission Check
+            if not await self.check_permissions(ctx, command_name):
+                success, error = await self.send_response_once(
+                    ctx,
+                    content="❌ You don't have permission to use this command!",
+                    delete_after=5
+                )
+                if not success:
+                    logger.warning(f"Failed to send permission message: {error}")
+                return
+                
+            # Cooldown Check
+            can_run, remaining = await self.check_cooldown(ctx.author.id, command_name)
+            if not can_run:
+                success, error = await self.send_response_once(
+                    ctx,
+                    content=f"⏰ Please wait {remaining:.1f}s before using this command again!",
+                    delete_after=5
+                )
+                if not success:
+                    logger.warning(f"Failed to send cooldown message: {error}")
+                return
+
+            # Track command usage
+            await self.analytics.track_command(ctx, command_name)
+            
+            # Log successful execution
+            await self.log_command(ctx, command_name, True)
+
+        except Exception as e:
+            # Error tracking dengan context
+            await self.analytics.track_error(command_name, e, ctx)
+            await self.log_command(ctx, command_name, False, e)
+            
+            # Get custom error message
+            error_message = self._get_error_message(e)
+            
+            # Send error message dengan anti-duplikasi
+            success, error = await self.send_response_once(
+                ctx,
+                content=error_message,
+                delete_after=5
+            )
+            if not success:
+                logger.error(f"Failed to send error message: {error}")
+                
+            logger.error(f"Error in command {command_name}: {e}")
+
     async def log_command(self, ctx: commands.Context, command: str, success: bool, error: Optional[Exception] = None) -> None:
         """Log command dengan better formatting dan error handling"""
         if not self.log_channel_id:
@@ -320,62 +389,14 @@ class AdvancedCommandHandler:
             permanent=True
         )
 
-# Line 323-375
-    async def handle_command(self, ctx: commands.Context, command_name: str, send_response: bool = True) -> None:
-        """Handle command dengan better error handling dan logging"""
-        try:
-            # Validate command exists
-            command = self.bot.get_command(command_name)
-            if not command:
-                logger.error(f"Command not found: {command_name}")
-                return
-    
-            # Rate Limit Check (tanpa response jika send_response=False)
-            if not await self.check_rate_limit(ctx):
-                if send_response:
-                    cooldown_msg = "🚫 You're sending commands too fast! Please slow down."
-                    await ctx.send(cooldown_msg, delete_after=5)
-                return
-                
-            # Permission Check (tanpa response jika send_response=False)
-            if not await self.check_permissions(ctx, command_name):
-                if send_response:
-                    perm_msg = "❌ You don't have permission to use this command!"
-                    await ctx.send(perm_msg, delete_after=5)
-                return
-                
-            # Cooldown Check (tanpa response jika send_response=False)
-            can_run, remaining = await self.check_cooldown(ctx.author.id, command_name)
-            if not can_run:
-                if send_response:
-                    cooldown_msg = f"⏰ Please wait {remaining:.1f}s before using this command again!"
-                    await ctx.send(cooldown_msg, delete_after=5)
-                return
-                
-            # Track command usage
-            await self.analytics.track_command(ctx, command_name)
-            
-            # Log successful execution
-            await self.log_command(ctx, command_name, True)
-            
-        except Exception as e:
-            # Error tracking dengan context
-            await self.analytics.track_error(command_name, e, ctx)
-            await self.log_command(ctx, command_name, False, e)
-            
-            if send_response:
-                # Custom error messages
-                error_message = "❌ An error occurred while executing the command!"
-                
-                if isinstance(e, commands.MissingPermissions):
-                    error_message = "❌ You don't have the required permissions!"
-                elif isinstance(e, commands.CommandOnCooldown):
-                    error_message = f"⏰ Please wait {e.retry_after:.1f}s before using this command again!"
-                elif isinstance(e, commands.MissingRequiredArgument):
-                    error_message = f"❌ Missing required argument: {e.param.name}"
-                elif isinstance(e, commands.BadArgument):
-                    error_message = "❌ Invalid argument provided!"
-                
-                await ctx.send(error_message, delete_after=5)
-                
-            logger.error(f"Error in command {command_name}: {e}")
+    def _get_error_message(self, error: Exception) -> str:
+        """Get custom error message based on exception type"""
+        if isinstance(error, commands.MissingPermissions):
+            return "❌ You don't have the required permissions!"
+        elif isinstance(error, commands.CommandOnCooldown):
+            return f"⏰ Please wait {error.retry_after:.1f}s before using this command again!"
+        elif isinstance(error, commands.MissingRequiredArgument):
+            return f"❌ Missing required argument: {error.param.name}"
+        elif isinstance(error, commands.BadArgument):
+            return "❌ Invalid argument provided!"
+        return "❌ An error occurred while executing the command!"
