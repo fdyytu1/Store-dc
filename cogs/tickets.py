@@ -1,495 +1,832 @@
+"""
+Ticket System for Store DC Bot
+Author: fdyytu1
+Created at: 2025-03-13 11:49:51 UTC
+"""
+
 import discord
 from discord.ext import commands
+from discord.ui import Button, View, Modal, Select
+import logging
 import asyncio
-from datetime import datetime
 import json
-import sqlite3
-from typing import Optional, Dict
-from .utils import Embed, get_connection, logger
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List
 
-class TicketSystem(commands.Cog):
-    """🎫 Advanced Ticket Support System"""
-    
+from .utils import (
+    Embed, 
+    get_connection,
+    logger, 
+    EventDispatcher,
+    Permissions,
+    transaction
+)
+from ext.constants import (
+    COLORS,
+    MESSAGES,
+    EVENTS,
+    CACHE_TIMEOUT,
+    BUTTON_IDS
+)
+from ext.base_handler import BaseLockHandler
+from ext.cache_manager import CacheManager
+
+logger = logging.getLogger(__name__)
+
+# Views
+class TicketView(View):
     def __init__(self, bot):
+        super().__init__(timeout=None)
         self.bot = bot
-        self.active_tickets = {}
-
-    def setup_tables(self):
-        """Setup necessary database tables"""
+        
+    @discord.ui.button(
+        label="Create Ticket",
+        style=discord.ButtonStyle.primary,
+        emoji="🎫",
+        custom_id=BUTTON_IDS.TICKET_CREATE
+    )
+    async def create_ticket(self, interaction: discord.Interaction, button: Button):
+        # Prevent double clicks
+        await interaction.response.defer(ephemeral=True)
+        
+        # Check if user already has modal open
+        if hasattr(interaction.user, 'ticket_modal_open'):
+            return await interaction.followup.send(
+                "You already have a ticket creation window open!",
+                ephemeral=True
+            )
+            
+        setattr(interaction.user, 'ticket_modal_open', True)
         try:
+            await interaction.followup.send_modal(TicketModal(self.bot))
+        finally:
+            delattr(interaction.user, 'ticket_modal_open')
+
+class TicketModal(discord.ui.Modal):
+    def __init__(self, bot):
+        super().__init__(title="Create Support Ticket")
+        self.bot = bot
+        
+        self.topic = discord.ui.TextInput(
+            label="Topic",
+            placeholder="E.g. Payment Issue, Technical Support, etc.",
+            required=True,
+            max_length=100
+        )
+        
+        self.description = discord.ui.TextInput(
+            label="Description",
+            style=discord.TextStyle.paragraph,
+            placeholder="Please describe your issue in detail",
+            required=True,
+            max_length=1000
+        )
+        
+        self.add_item(self.topic)
+        self.add_item(self.description)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Prevent double submission
+        if hasattr(interaction, 'ticket_submitted'):
+            return
+        setattr(interaction, 'ticket_submitted', True)
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        ticket_system = self.bot.get_cog("TicketSystem")
+        if not ticket_system:
+            return await interaction.followup.send(
+                "Ticket system is not available",
+                ephemeral=True
+            )
+            
+        await ticket_system.create_ticket(
+            interaction,
+            str(self.topic),
+            str(self.description)
+        )
+
+class TicketControlView(View):
+    def __init__(self, bot, ticket_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot
+        self.ticket_id = ticket_id
+        
+    @discord.ui.button(
+        label="Close",
+        style=discord.ButtonStyle.red,
+        emoji="🔒",
+        custom_id=f"{BUTTON_IDS.TICKET_CLOSE}_{close_ticket}"
+    )
+    async def close_ticket(self, interaction: discord.Interaction, button: Button):
+        # Prevent double clicks
+        await interaction.response.defer(ephemeral=True)
+        
+        ticket_system = self.bot.get_cog("TicketSystem")
+        if not ticket_system:
+            return await interaction.followup.send(
+                "Ticket system is not available",
+                ephemeral=True
+            )
+        
+        # Check if ticket is already being closed
+        if hasattr(interaction.channel, 'closing'):
+            return await interaction.followup.send(
+                "This ticket is already being closed!",
+                ephemeral=True
+            )
+            
+        setattr(interaction.channel, 'closing', True)
+        try:
+            await ticket_system.close_ticket(interaction, self.ticket_id)
+        finally:
+            if hasattr(interaction.channel, 'closing'):
+                delattr(interaction.channel, 'closing')
+        
+    @discord.ui.button(
+        label="Priority",
+        style=discord.ButtonStyle.secondary,
+        emoji="⭐",
+        custom_id=f"{BUTTON_IDS.TICKET_PRIORITY}_{ticket_id}"
+    )
+    async def set_priority(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.defer(ephemeral=True)
+        
+        ticket_system = self.bot.get_cog("TicketSystem")
+        if not ticket_system:
+            return await interaction.followup.send(
+                "Ticket system is not available",
+                ephemeral=True
+            )
+        
+        options = [
+            discord.SelectOption(label="Low", value="low", emoji="🟢"),
+            discord.SelectOption(label="Medium", value="medium", emoji="🟡"),
+            discord.SelectOption(label="High", value="high", emoji="🔴"),
+            discord.SelectOption(label="Urgent", value="urgent", emoji="⚡")
+        ]
+        
+        select = discord.ui.Select(
+            placeholder="Select ticket priority",
+            options=options,
+            custom_id=f"priority_select_{self.ticket_id}"
+        )
+        
+        async def priority_callback(interaction: discord.Interaction):
+            if hasattr(interaction, 'priority_set'):
+                return
+            setattr(interaction, 'priority_set', True)
+            
+            await ticket_system.set_ticket_priority(
+                interaction,
+                self.ticket_id,
+                select.values[0]
+            )
+            
+        select.callback = priority_callback
+        view = View()
+        view.add_item(select)
+        await interaction.followup.send(
+            "Select ticket priority:",
+            view=view,
+            ephemeral=True
+        )
+
+# Main Ticket System
+class TicketSystem(commands.Cog, BaseLockHandler):
+    def __init__(self, bot):
+        super().__init__()
+        self.bot = bot
+        self.cache_manager = CacheManager()
+        self.active_tickets = {}
+        self.ticket_cooldowns = {}
+        self.setup_tasks = {}
+        self.auto_close_task = self.bot.loop.create_task(self.check_inactive_tickets())
+        
+    def cog_unload(self):
+        """Cleanup when cog is unloaded"""
+        self.auto_close_task.cancel()
+        for task in self.setup_tasks.values():
+            task.cancel()
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Setup ticket channels and load active tickets"""
+        logger.info("Setting up ticket system...")
+        
+        try:
+            # Load active tickets first
             conn = get_connection()
             cursor = conn.cursor()
-
-            # Ticket settings table
+            
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS ticket_settings (
-                    guild_id TEXT PRIMARY KEY,
-                    category_id TEXT,
-                    log_channel_id TEXT,
-                    support_role_id TEXT,
-                    max_tickets INTEGER DEFAULT 1,
-                    ticket_format TEXT DEFAULT 'ticket-{user}-{number}',
-                    auto_close_hours INTEGER DEFAULT 48,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
+                SELECT id, channel_id FROM tickets 
+                WHERE status = 'open'
             """)
             
-            # Tickets table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS tickets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    guild_id TEXT NOT NULL,
-                    channel_id TEXT NOT NULL,
-                    user_id TEXT NOT NULL,
-                    reason TEXT,
-                    status TEXT DEFAULT 'open' CHECK (status IN ('open', 'closed')),
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    closed_at TIMESTAMP,
-                    closed_by TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+            for row in cursor.fetchall():
+                self.active_tickets[int(row['channel_id'])] = row['id']
+                
+            logger.info(f"Loaded {len(self.active_tickets)} active tickets")
             
-            # Ticket responses table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS ticket_responses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ticket_id INTEGER,
-                    user_id TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (ticket_id) REFERENCES tickets (id) ON DELETE CASCADE
-                )
-            """)
-
-            # Create triggers for timestamp updates
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS update_ticket_settings_timestamp 
-                AFTER UPDATE ON ticket_settings
-                BEGIN
-                    UPDATE ticket_settings SET updated_at = CURRENT_TIMESTAMP
-                    WHERE guild_id = NEW.guild_id;
-                END;
-            """)
-
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS update_tickets_timestamp 
-                AFTER UPDATE ON tickets
-                BEGIN
-                    UPDATE tickets SET updated_at = CURRENT_TIMESTAMP
-                    WHERE id = NEW.id;
-                END;
-            """)
-
-            cursor.execute("""
-                CREATE TRIGGER IF NOT EXISTS update_ticket_responses_timestamp 
-                AFTER UPDATE ON ticket_responses
-                BEGIN
-                    UPDATE ticket_responses SET updated_at = CURRENT_TIMESTAMP
-                    WHERE id = NEW.id;
-                END;
-            """)
-
-            # Create indexes
-            indexes = [
-                ("idx_tickets_guild", "tickets(guild_id)"),
-                ("idx_tickets_channel", "tickets(channel_id)"),
-                ("idx_tickets_user", "tickets(user_id)"),
-                ("idx_tickets_status", "tickets(status)"),
-                ("idx_ticket_responses_ticket", "ticket_responses(ticket_id)"),
-                ("idx_ticket_responses_user", "ticket_responses(user_id)")
-            ]
-
-            for idx_name, idx_cols in indexes:
-                cursor.execute(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {idx_cols}")
-
-            conn.commit()
-            logger.info("Ticket system tables setup completed successfully")
-
-        except sqlite3.Error as e:
-            logger.error(f"Failed to setup ticket tables: {e}")
-            if conn:
-                conn.rollback()
-            raise
+            # Setup channels for each guild
+            for guild in self.bot.guilds:
+                if guild.id not in self.setup_tasks:
+                    self.setup_tasks[guild.id] = self.bot.loop.create_task(
+                        self.setup_guild_tickets(guild)
+                    )
+            
+        except Exception as e:
+            logger.error(f"Error in ticket system setup: {e}")
         finally:
-            if conn:
+            if 'conn' in locals():
                 conn.close()
 
-    def get_guild_settings(self, guild_id: int) -> Dict:
+    async def setup_guild_tickets(self, guild):
+        """Setup ticket channel for a specific guild"""
+        try:
+            # Get settings
+            settings = await self.get_guild_settings(guild.id)
+            
+            # Find or create ticket channel
+            ticket_channel = None
+            for channel in guild.text_channels:
+                if channel.name.lower() == "ticket":
+                    ticket_channel = channel
+                    break
+                    
+            if not ticket_channel:
+                # Create ticket channel with proper permissions
+                overwrites = {
+                    guild.default_role: discord.PermissionOverwrite(
+                        send_messages=False,
+                        send_messages_in_threads=False
+                    ),
+                    guild.me: discord.PermissionOverwrite(
+                        send_messages=True,
+                        manage_channels=True,
+                        manage_messages=True
+                    )
+                }
+                
+                if settings.get('support_role_id'):
+                    support_role = guild.get_role(int(settings['support_role_id']))
+                    if support_role:
+                        overwrites[support_role] = discord.PermissionOverwrite(
+                            send_messages=True,
+                            manage_messages=True
+                        )
+                
+                ticket_channel = await guild.create_text_channel(
+                    "ticket",
+                    overwrites=overwrites
+                )
+                logger.info(f"Created ticket channel in {guild.name}")
+            
+            # Check if button exists
+            button_exists = False
+            async for message in ticket_channel.history(limit=100):
+                if message.author == self.bot.user and any(
+                    component.custom_id == BUTTON_IDS.TICKET_CREATE 
+                    for component in message.components
+                ):
+                    button_exists = True
+                    break
+            
+            if not button_exists:
+                # Create ticket button
+                embed = Embed.create(
+                    title="🎫 Support Ticket System",
+                    description=(
+                        "Need help? Click the button below to create a support ticket!\n\n"
+                        "**Guidelines:**\n"
+                        "• One ticket per issue\n"
+                        "• Be patient and respectful\n"
+                        "• Provide clear information\n"
+                        "• Follow server rules"
+                    ),
+                    color=COLORS.INFO
+                )
+                
+                view = TicketView(self.bot)
+                await ticket_channel.send(embed=embed, view=view)
+                logger.info(f"Created ticket button in {guild.name}")
+                
+        except Exception as e:
+            logger.error(f"Error setting up tickets for {guild.name}: {e}")
+        finally:
+            if guild.id in self.setup_tasks:
+                del self.setup_tasks[guild.id]
+
+    async def get_guild_settings(self, guild_id: int) -> Dict:
         """Get ticket settings for a guild"""
+        cache_key = f"ticket_settings_{guild_id}"
+        
+        # Try cache first
+        settings = await self.cache_manager.get(cache_key)
+        if settings:
+            return settings
+            
+        conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
             cursor.execute("""
-                SELECT * FROM ticket_settings WHERE guild_id = ?
+                SELECT * FROM ticket_settings 
+                WHERE guild_id = ?
             """, (str(guild_id),))
             
             data = cursor.fetchone()
             
             if not data:
-                return {
+                # Use default settings
+                settings = {
                     'category_id': None,
                     'log_channel_id': None,
                     'support_role_id': None,
                     'max_tickets': 1,
                     'ticket_format': 'ticket-{user}-{number}',
-                    'auto_close_hours': 48
+                    'auto_close_hours': 48,
+                    'notification_channel': None,
+                    'allow_user_close': True,
+                    'ticket_welcome': "Support team will assist you shortly."
                 }
                 
-            return dict(data)
-
-        except sqlite3.Error as e:
-            logger.error(f"Error fetching guild settings: {e}")
+                # Save default settings
+                cursor.execute("""
+                    INSERT INTO ticket_settings (guild_id)
+                    VALUES (?)
+                """, (str(guild_id),))
+                
+                conn.commit()
+            else:
+                settings = dict(data)
+            
+            # Cache settings
+            await self.cache_manager.set(
+                cache_key,
+                settings,
+                expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.MEDIUM)
+            )
+            
+            return settings
+            
+        except Exception as e:
+            logger.error(f"Error getting guild settings: {e}")
             return {}
         finally:
             if conn:
                 conn.close()
 
-    async def create_ticket_channel(self, ctx, reason: str, settings: Dict) -> Optional[discord.TextChannel]:
-        """Create a new ticket channel"""
+    async def create_ticket(
+        self,
+        interaction: discord.Interaction,
+        title: str,
+        description: str
+    ):
+        """Create a new ticket"""
+        settings = await self.get_guild_settings(interaction.guild_id)
+        
+        # Check rate limiting
+        user_id = str(interaction.user.id)
+        if user_id in self.ticket_cooldowns:
+            remaining = self.ticket_cooldowns[user_id] - datetime.utcnow()
+            if remaining.total_seconds() > 0:
+                return await interaction.followup.send(
+                    f"Please wait {int(remaining.total_seconds())} seconds before creating another ticket",
+                    ephemeral=True
+                )
+
+        conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
-
+            
             # Check max tickets
             cursor.execute("""
-                SELECT COUNT(*) FROM tickets 
+                SELECT COUNT(*) as count FROM tickets 
                 WHERE guild_id = ? AND user_id = ? AND status = 'open'
-            """, (str(ctx.guild.id), str(ctx.author.id)))
+            """, (str(interaction.guild_id), user_id))
             
-            count = cursor.fetchone()[0]
-            
+            count = cursor.fetchone()['count']
             if count >= settings['max_tickets']:
-                await ctx.send("❌ You have reached the maximum number of open tickets!")
-                return None
-
-            # Get category
+                return await interaction.followup.send(
+                    "You have reached the maximum number of open tickets!",
+                    ephemeral=True
+                )
+                
+            # Get or create category
             category_id = settings.get('category_id')
-            category = ctx.guild.get_channel(int(category_id)) if category_id else None
+            category = interaction.guild.get_channel(int(category_id)) if category_id else None
             
             if not category:
-                category = await ctx.guild.create_category("Tickets")
+                category = await interaction.guild.create_category("Tickets")
                 cursor.execute("""
-                    INSERT OR REPLACE INTO ticket_settings (guild_id, category_id)
-                    VALUES (?, ?)
-                """, (str(ctx.guild.id), str(category.id)))
+                    UPDATE ticket_settings 
+                    SET category_id = ? 
+                    WHERE guild_id = ?
+                """, (str(category.id), str(interaction.guild_id)))
                 conn.commit()
-
-            # Create channel
-            ticket_number = count + 1
-            channel_name = settings['ticket_format'].format(
-                user=ctx.author.name.lower(),
-                number=ticket_number
-            )
-
-            # Set permissions
+            
+            # Set channel permissions
             overwrites = {
-                ctx.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                ctx.author: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                ctx.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                interaction.guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True)
             }
-
-            # Add support role permissions
+            
             if settings['support_role_id']:
-                support_role = ctx.guild.get_role(int(settings['support_role_id']))
+                support_role = interaction.guild.get_role(int(settings['support_role_id']))
                 if support_role:
                     overwrites[support_role] = discord.PermissionOverwrite(
                         read_messages=True,
-                        send_messages=True
+                        send_messages=True,
+                        manage_messages=True
                     )
-
-            # Create the channel
+                    
+            # Create channel
+            channel_name = settings['ticket_format'].format(
+                user=interaction.user.name.lower(),
+                number=count + 1
+            )
+            
             channel = await category.create_text_channel(
                 channel_name,
                 overwrites=overwrites
             )
-
+            
             # Save ticket to database
             cursor.execute("""
-                INSERT INTO tickets (guild_id, channel_id, user_id, reason)
-                VALUES (?, ?, ?, ?)
-            """, (str(ctx.guild.id), str(channel.id), str(ctx.author.id), reason))
+                INSERT INTO tickets (
+                    guild_id, channel_id, user_id,
+                    title, description, last_activity
+                ) VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                str(interaction.guild_id),
+                str(channel.id),
+                user_id,
+                title,
+                description,
+                datetime.utcnow()
+            ))
             
             ticket_id = cursor.lastrowid
-            conn.commit()
-
             self.active_tickets[channel.id] = ticket_id
             
-            # Log creation in admin_logs
-            cursor.execute("""
-                INSERT INTO admin_logs (admin_id, action, target, details)
-                VALUES (?, ?, ?, ?)
-            """, (
-                str(ctx.author.id),
-                'ticket_create',
-                str(channel.id),
-                f"Ticket created: {reason}"
-            ))
+            # Create ticket embed
+            embed = Embed.create(
+                title=f"Ticket: {title}",
+                description=description,
+                color=COLORS.DEFAULT
+            )
+            embed.add_field(name="Created By", value=interaction.user.mention)
+            embed.add_field(name="Status", value="🟢 Open")
+            embed.add_field(name="Priority", value="🟢 Low")
+            embed.set_footer(text=f"Ticket ID: {ticket_id}")
+            
+            # Add ticket controls
+            control_view = TicketControlView(self.bot, ticket_id)
+            
+            # Send welcome message
+            welcome_msg = settings.get('ticket_welcome', "Support team will assist you shortly.")
+            await channel.send(
+                f"{interaction.user.mention} {welcome_msg}",
+                embed=embed,
+                view=control_view
+            )
+            
+            # Send notification
+            if settings.get('notification_channel'):
+                notif_channel = interaction.guild.get_channel(
+                    int(settings['notification_channel'])
+                )
+                if notif_channel:
+                    await notif_channel.send(
+                        f"New ticket created by {interaction.user.mention}: {title}"
+                    )
+            
+            # Set cooldown
+            self.ticket_cooldowns[user_id] = datetime.utcnow() + timedelta(minutes=5)
+            
+            await interaction.followup.send(
+                f"Ticket created! Head to {channel.mention}",
+                ephemeral=True
+            )
+            
             conn.commit()
             
-            return channel
-
-        except sqlite3.Error as e:
-            logger.error(f"Error creating ticket channel: {e}")
+        except Exception as e:
+            logger.error(f"Error creating ticket: {e}")
             if conn:
                 conn.rollback()
-            return None
+            await interaction.followup.send(
+                "An error occurred while creating the ticket",
+                ephemeral=True
+            )
         finally:
             if conn:
                 conn.close()
 
-    @commands.group(name="ticket")
-    async def ticket(self, ctx):
-        """🎫 Ticket management commands"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
-
-    @ticket.command(name="create")
-    async def create_ticket(self, ctx, *, reason: str = "No reason provided"):
-        """Create a new support ticket"""
-        settings = self.get_guild_settings(ctx.guild.id)
-        
-        channel = await self.create_ticket_channel(ctx, reason, settings)
-        if not channel:
-            return
-
-        embed = Embed.create(
-            title="🎫 Support Ticket",
-            description=f"Ticket created by {ctx.author.mention}",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="Reason", value=reason)
-        embed.add_field(name="Instructions", value="React with 🔒 to close the ticket\nSupport team will assist you shortly.")
-
-        msg = await channel.send(embed=embed)
-        await msg.add_reaction("🔒")
-
-    @ticket.command(name="close")
-    async def close_ticket(self, ctx):
-        """Close the current ticket"""
-        if ctx.channel.id not in self.active_tickets:
-            return await ctx.send("❌ This is not a ticket channel!")
-
+    async def close_ticket(self, interaction: discord.Interaction, ticket_id: int):
+        """Close a ticket"""
+        conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
-
-            ticket_id = self.active_tickets[ctx.channel.id]
             
-            # Update database
+            # Get ticket info
+            cursor.execute("""
+                SELECT * FROM tickets WHERE id = ?
+            """, (ticket_id,))
+            
+            ticket = cursor.fetchone()
+            if not ticket:
+                return await interaction.followup.send(
+                    "Ticket not found!",
+                    ephemeral=True
+                )
+                
+            # Check permissions
+            settings = await self.get_guild_settings(interaction.guild_id)
+            is_support = False
+            if settings['support_role_id']:
+                support_role = interaction.guild.get_role(int(settings['support_role_id']))
+                if support_role in interaction.user.roles:
+                    is_support = True
+                    
+            if not (is_support or str(interaction.user.id) == ticket['user_id']):
+                return await interaction.followup.send(
+                    "You don't have permission to close this ticket!",
+                    ephemeral=True
+                )
+            
+            # Ask for feedback
+            embed = Embed.create(
+                title="Ticket Feedback",
+                description="Please rate your support experience:",
+                color=COLORS.DEFAULT
+            )
+            
+            view = View()
+            options = [
+                discord.SelectOption(label="Excellent", value="5", emoji="⭐⭐⭐⭐⭐"),
+                discord.SelectOption(label="Good", value="4", emoji="⭐⭐⭐⭐"),
+                discord.SelectOption(label="Okay", value="3", emoji="⭐⭐⭐"),
+                discord.SelectOption(label="Poor", value="2", emoji="⭐⭐"),
+                discord.SelectOption(label="Very Poor", value="1", emoji="⭐")
+            ]
+            
+            select = discord.ui.Select(
+                placeholder="Select rating",
+                options=options,
+                custom_id=f"feedback_select_{ticket_id}"
+            )
+            
+            async def feedback_callback(interaction: discord.Interaction):
+                if hasattr(interaction, 'feedback_submitted'):
+                    return
+                setattr(interaction, 'feedback_submitted', True)
+                
+                rating = int(select.values[0])
+                
+                # Update ticket
+                cursor.execute("""
+                    UPDATE tickets 
+                    SET feedback_score = ?,
+                        status = 'closed',
+                        closed_at = CURRENT_TIMESTAMP,
+                        closed_by = ?
+                    WHERE id = ?
+                """, (rating, str(interaction.user.id), ticket_id))
+                
+                # Create transcript
+                transcript = await self.create_transcript(interaction.channel)
+                
+                # Log closure
+                if settings['log_channel_id']:
+                    log_channel = interaction.guild.get_channel(
+                        int(settings['log_channel_id'])
+                    )
+                    if log_channel:
+                        log_embed = Embed.create(
+                            title="Ticket Closed",
+                            color=COLORS.ERROR
+                        )
+                        log_embed.add_field(name="Ticket ID", value=str(ticket_id))
+                        log_embed.add_field(name="Closed By", value=interaction.user.mention)
+                        log_embed.add_field(name="Rating", value=f"{rating} ⭐")
+                        
+                        if transcript:
+                            log_embed.add_field(
+                                name="Transcript",
+                                value=transcript[:1000] + "..." if len(transcript) > 1000 else transcript,
+                                inline=False
+                            )
+                            
+                        await log_channel.send(embed=log_embed)
+                
+                # Delete channel after delay
+                await interaction.response.send_message("Closing ticket in 5 seconds...")
+                await asyncio.sleep(5)
+                await interaction.channel.delete()
+                
+                # Remove from active tickets
+                if interaction.channel.id in self.active_tickets:
+                    del self.active_tickets[interaction.channel.id]
+                
+                conn.commit()
+            
+            select.callback = feedback_callback
+            view.add_item(select)
+            await interaction.followup.send(embed=embed, view=view)
+            
+        except Exception as e:
+            logger.error(f"Error closing ticket: {e}")
+            if conn:
+                conn.rollback()
+            await interaction.followup.send(
+                "An error occurred while closing the ticket",
+                ephemeral=True
+            )
+        finally:
+            if conn:
+                conn.close()
+
+    async def set_ticket_priority(
+        self,
+        interaction: discord.Interaction,
+        ticket_id: int,
+        priority: str
+    ):
+        """Set ticket priority"""
+        conn = None
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            # Check permissions
+            settings = await self.get_guild_settings(interaction.guild_id)
+            if settings['support_role_id']:
+                support_role = interaction.guild.get_role(int(settings['support_role_id']))
+                if support_role not in interaction.user.roles:
+                    return await interaction.followup.send(
+                        "You don't have permission to set ticket priority!",
+                        ephemeral=True
+                    )
+            
+            # Update priority
             cursor.execute("""
                 UPDATE tickets 
-                SET status = 'closed', 
-                    closed_at = CURRENT_TIMESTAMP,
-                    closed_by = ?
+                SET priority = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
-            """, (str(ctx.author.id), ticket_id))
-
-            # Log closure in admin_logs
-            cursor.execute("""
-                INSERT INTO admin_logs (admin_id, action, target, details)
-                VALUES (?, ?, ?, ?)
-            """, (
-                str(ctx.author.id),
-                'ticket_close',
-                str(ctx.channel.id),
-                f"Ticket {ticket_id} closed"
-            ))
-
-            conn.commit()
-
-            # Create and save transcript
-            transcript = await self.create_transcript(ctx.channel)
+            """, (priority, ticket_id))
             
-            # Delete channel
-            await ctx.send("🔒 Closing ticket in 5 seconds...")
-            await asyncio.sleep(5)
-            await ctx.channel.delete()
-
-            del self.active_tickets[ctx.channel.id]
-
-        except sqlite3.Error as e:
-            logger.error(f"Error closing ticket: {e}")
-            await ctx.send("❌ An error occurred while closing the ticket")
+            # Update embed
+            async for message in interaction.channel.history(limit=1):
+                if message.author == self.bot.user and message.embeds:
+                    embed = message.embeds[0]
+                    
+                    # Set color based on priority
+                    colors = {
+                        'low': COLORS.SUCCESS,
+                        'medium': COLORS.WARNING,
+                        'high': COLORS.ERROR,
+                        'urgent': discord.Color.dark_red()
+                    }
+                    embed.color = colors.get(priority, COLORS.DEFAULT)
+                    
+                    # Update priority field
+                    for i, field in enumerate(embed.fields):
+                        if field.name == "Priority":
+                            embed.remove_field(i)
+                            break
+                            
+                    emoji = {
+                        'low': '🟢',
+                        'medium': '🟡',
+                        'high': '🔴',
+                        'urgent': '⚡'
+                    }
+                    
+                    embed.add_field(
+                        name="Priority",
+                        value=f"{emoji.get(priority, '❓')} {priority.title()}",
+                        inline=True
+                    )
+                    
+                    await message.edit(embed=embed)
+            
+            # Send notification for high/urgent priority
+            if priority in ['high', 'urgent'] and settings.get('notification_channel'):
+                notif_channel = interaction.guild.get_channel(
+                    int(settings['notification_channel'])
+                )
+                if notif_channel:
+                    await notif_channel.send(
+                        f"⚠️ Ticket {ticket_id} priority set to {priority.upper()}\n"
+                        f"Channel: {interaction.channel.mention}"
+                    )
+            
+            conn.commit()
+            await interaction.followup.send(
+                f"Ticket priority set to {priority}",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Error setting priority: {e}")
+            if conn:
+                conn.rollback()
+            await interaction.followup.send(
+                "An error occurred while setting priority",
+                ephemeral=True
+            )
         finally:
             if conn:
                 conn.close()
 
-    @ticket.command(name="add")
-    async def add_user(self, ctx, user: discord.Member):
-        """Add a user to the current ticket"""
-        if ctx.channel.id not in self.active_tickets:
-            return await ctx.send("❌ This is not a ticket channel!")
-
-        await ctx.channel.set_permissions(user, read_messages=True, send_messages=True)
-        
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            # Log user addition in admin_logs
-            cursor.execute("""
-                INSERT INTO admin_logs (admin_id, action, target, details)
-                VALUES (?, ?, ?, ?)
-            """, (
-                str(ctx.author.id),
-                'ticket_add_user',
-                str(user.id),
-                f"Added to ticket channel {ctx.channel.id}"
-            ))
-            conn.commit()
-            
-            await ctx.send(f"✅ Added {user.mention} to the ticket")
-            
-        except sqlite3.Error as e:
-            logger.error(f"Error adding user to ticket: {e}")
-        finally:
-            if conn:
-                conn.close()
-
-    @ticket.command(name="remove")
-    async def remove_user(self, ctx, user: discord.Member):
-        """Remove a user from the current ticket"""
-        if ctx.channel.id not in self.active_tickets:
-            return await ctx.send("❌ This is not a ticket channel!")
-
-        await ctx.channel.set_permissions(user, overwrite=None)
-        
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            # Log user removal in admin_logs
-            cursor.execute("""
-                INSERT INTO admin_logs (admin_id, action, target, details)
-                VALUES (?, ?, ?, ?)
-            """, (
-                str(ctx.author.id),
-                'ticket_remove_user',
-                str(user.id),
-                f"Removed from ticket channel {ctx.channel.id}"
-            ))
-            conn.commit()
-            
-            await ctx.send(f"✅ Removed {user.mention} from the ticket")
-            
-        except sqlite3.Error as e:
-            logger.error(f"Error removing user from ticket: {e}")
-        finally:
-            if conn:
-                conn.close()
-
-    @commands.group(name="ticketset")
-    @commands.has_permissions(administrator=True)
-    async def ticketset(self, ctx):
-        """⚙️ Ticket system settings"""
-        if ctx.invoked_subcommand is None:
-            await ctx.send_help(ctx.command)
-
-    @ticketset.command(name="supportrole")
-    async def set_support_role(self, ctx, role: discord.Role):
-        """Set the support team role"""
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                INSERT OR REPLACE INTO ticket_settings (guild_id, support_role_id)
-                VALUES (?, ?)
-            """, (str(ctx.guild.id), str(role.id)))
-            
-            # Log setting change in admin_logs
-            cursor.execute("""
-                INSERT INTO admin_logs (admin_id, action, target, details)
-                VALUES (?, ?, ?, ?)
-            """, (
-                str(ctx.author.id),
-                'ticket_settings_update',
-                'support_role',
-                f"Set to {role.name} ({role.id})"
-            ))
-            
-            conn.commit()
-            await ctx.send(f"✅ Support role set to {role.mention}")
-            
-        except sqlite3.Error as e:
-            logger.error(f"Error setting support role: {e}")
-            await ctx.send("❌ An error occurred while setting the support role")
-        finally:
-            if conn:
-                conn.close()
-
-    @ticketset.command(name="maxtickets")
-    async def set_max_tickets(self, ctx, amount: int):
-        """Set maximum open tickets per user"""
-        if amount < 1:
-            return await ctx.send("❌ Amount must be at least 1!")
-
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                INSERT OR REPLACE INTO ticket_settings (guild_id, max_tickets)
-                VALUES (?, ?)
-            """, (str(ctx.guild.id), amount))
-            
-            # Log setting change in admin_logs
-            cursor.execute("""
-                INSERT INTO admin_logs (admin_id, action, target, details)
-                VALUES (?, ?, ?, ?)
-            """, (
-                str(ctx.author.id),
-                'ticket_settings_update',
-                'max_tickets',
-                f"Set to {amount}"
-            ))
-            
-            conn.commit()
-            await ctx.send(f"✅ Maximum tickets per user set to {amount}")
-            
-        except sqlite3.Error as e:
-            logger.error(f"Error setting max tickets: {e}")
-            await ctx.send("❌ An error occurred while setting the maximum tickets")
-        finally:
-            if conn:
-                conn.close()
-
-    @ticketset.command(name="logchannel")
-    async def set_log_channel(self, ctx, channel: discord.TextChannel):
-        """Set the ticket log channel"""
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                INSERT OR REPLACE INTO ticket_settings (guild_id, log_channel_id)
-                VALUES (?, ?)
-            """, (str(ctx.guild.id), str(channel.id)))
-            
-            # Log setting change in admin_logs
-            cursor.execute("""
-                INSERT INTO admin_logs (admin_id, action, target, details)
-                VALUES (?, ?, ?, ?)
-            """, (
-                str(ctx.author.id),
-                'ticket_settings_update',
-                'log_channel',
-                f"Set to {channel.name} ({channel.id})"
-            ))
-            
-            conn.commit()
-            await ctx.send(f"✅ Log channel set to {channel.mention}")
-            
-        except sqlite3.Error as e:
-            logger.error(f"Error setting log channel: {e}")
-            await ctx.send("❌ An error occurred while setting the log channel")
-        finally:
-            if conn:
-                conn.close()
+    async def check_inactive_tickets(self):
+        """Auto-close inactive tickets"""
+        while True:
+            try:
+                await asyncio.sleep(3600)  # Check every hour
+                
+                conn = get_connection()
+                cursor = conn.cursor()
+                
+                # Get all guilds' settings
+                cursor.execute("SELECT * FROM ticket_settings")
+                guild_settings = cursor.fetchall()
+                
+                for settings in guild_settings:
+                    auto_close_hours = settings['auto_close_hours']
+                    guild_id = settings['guild_id']
+                    
+                    # Find inactive tickets
+                    cursor.execute("""
+                        SELECT id, channel_id 
+                        FROM tickets 
+                        WHERE guild_id = ? 
+                          AND status = 'open'
+                          AND last_activity < ?
+                    """, (
+                        guild_id,
+                        datetime.utcnow() - timedelta(hours=auto_close_hours)
+                    ))
+                    
+                    inactive_tickets = cursor.fetchall()
+                    
+                    for ticket in inactive_tickets:
+                        try:
+                            channel = self.bot.get_channel(int(ticket['channel_id']))
+                            if channel:
+                                await channel.send(
+                                    "⚠️ This ticket has been inactive for "
+                                    f"{auto_close_hours} hours and will be closed automatically."
+                                )
+                                await asyncio.sleep(5)
+                                await channel.delete()
+                                
+                                # Update database
+                                cursor.execute("""
+                                    UPDATE tickets 
+                                    SET status = 'closed',
+                                        closed_at = CURRENT_TIMESTAMP,
+                                        closed_by = ?,
+                                        resolution = 'Auto-closed due to inactivity'
+                                    WHERE id = ?
+                                """, (str(self.bot.user.id), ticket['id']))
+                                
+                                # Remove from active tickets
+                                if int(ticket['channel_id']) in self.active_tickets:
+                                    del self.active_tickets[int(ticket['channel_id'])]
+                                
+                                # Log auto-close
+                                if settings['log_channel_id']:
+                                    log_channel = self.bot.get_channel(
+                                        int(settings['log_channel_id'])
+                                    )
+                                    if log_channel:
+                                        embed = Embed.create(
+                                            title="Ticket Auto-Closed",
+                                            description=f"Ticket {ticket['id']} was closed due to inactivity",
+                                            color=COLORS.WARNING
+                                        )
+                                        await log_channel.send(embed=embed)
+                                        
+                        except Exception as e:
+                            logger.error(f"Error auto-closing ticket {ticket['id']}: {e}")
+                            continue
+                            
+                conn.commit()
+                
+            except Exception as e:
+                logger.error(f"Error in inactive ticket check: {e}")
+            finally:
+                if conn:
+                    conn.close()
 
     async def create_transcript(self, channel: discord.TextChannel) -> str:
         """Create a transcript of the ticket"""
@@ -501,165 +838,8 @@ class TicketSystem(commands.Cog):
                 'timestamp': message.created_at.strftime('%Y-%m-%d %H:%M:%S')
             })
 
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            # Save transcript in ticket_responses
-            for msg in messages:
-                cursor.execute("""
-                    INSERT INTO ticket_responses (ticket_id, user_id, content)
-                    VALUES (?, ?, ?)
-                """, (
-                    self.active_tickets[channel.id],
-                    msg['author'],
-                    msg['content']
-                ))
-            
-            conn.commit()
-            
-        except sqlite3.Error as e:
-            logger.error(f"Error saving ticket transcript: {e}")
-        finally:
-            if conn:
-                conn.close()
-
         return json.dumps(messages, indent=2)
-
-    def get_ticket_duration(self, ticket_id: int) -> str:
-        """Get the duration of a ticket"""
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT created_at, closed_at FROM tickets WHERE id = ?
-            """, (ticket_id,))
-            
-            data = cursor.fetchone()
-            
-            if not data or not data['closed_at']:
-                return "Unknown"
-                
-            created = datetime.strptime(data['created_at'], '%Y-%m-%d %H:%M:%S')
-            closed = datetime.strptime(data['closed_at'], '%Y-%m-%d %H:%M:%S')
-            duration = closed - created
-            
-            return str(duration).split('.')[0]
-            
-        except sqlite3.Error as e:
-            logger.error(f"Error getting ticket duration: {e}")
-            return "Unknown"
-        finally:
-            if conn:
-                conn.close()
-
-    @commands.Cog.listener()
-    async def on_raw_reaction_add(self, payload):
-        """Handle ticket reactions"""
-        if payload.user_id == self.bot.user.id:
-            return
-
-        if str(payload.emoji) != "🔒":
-            return
-
-        channel = self.bot.get_channel(payload.channel_id)
-        if not channel.id in self.active_tickets:
-            return
-
-        ctx = await self.bot.get_context(await channel.fetch_message(payload.message_id))
-        await self.close_ticket(ctx)
-
-    @ticketset.command(name="format")
-    async def set_ticket_format(self, ctx, *, format_string: str):
-        """Set the ticket channel name format
-        Available variables: {user}, {number}
-        Example: ticket-{user}-{number}"""
-        
-        if not any(var in format_string for var in ['{user}', '{number}']):
-            return await ctx.send("❌ Format must include at least {user} or {number}!")
-
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                INSERT OR REPLACE INTO ticket_settings (guild_id, ticket_format)
-                VALUES (?, ?)
-            """, (str(ctx.guild.id), format_string))
-            
-            # Log setting change
-            cursor.execute("""
-                INSERT INTO admin_logs (admin_id, action, target, details)
-                VALUES (?, ?, ?, ?)
-            """, (
-                str(ctx.author.id),
-                'ticket_settings_update',
-                'ticket_format',
-                f"Set to {format_string}"
-            ))
-            
-            conn.commit()
-            await ctx.send(f"✅ Ticket format set to: {format_string}")
-            
-        except sqlite3.Error as e:
-            logger.error(f"Error setting ticket format: {e}")
-            await ctx.send("❌ An error occurred while setting the ticket format")
-        finally:
-            if conn:
-                conn.close()
-
-    @ticketset.command(name="settings")
-    async def view_settings(self, ctx):
-        """View current ticket system settings"""
-        settings = self.get_guild_settings(ctx.guild.id)
-        
-        embed = discord.Embed(
-            title="🎫 Ticket System Settings",
-            color=discord.Color.blue(),
-            timestamp=datetime.utcnow()
-        )
-        
-        # Format settings for display
-        support_role = ctx.guild.get_role(int(settings['support_role_id'])) if settings['support_role_id'] else None
-        log_channel = ctx.guild.get_channel(int(settings['log_channel_id'])) if settings['log_channel_id'] else None
-        category = ctx.guild.get_channel(int(settings['category_id'])) if settings['category_id'] else None
-        
-        embed.add_field(
-            name="Support Role",
-            value=support_role.mention if support_role else "Not set",
-            inline=False
-        )
-        embed.add_field(
-            name="Log Channel",
-            value=log_channel.mention if log_channel else "Not set",
-            inline=False
-        )
-        embed.add_field(
-            name="Ticket Category",
-            value=category.name if category else "Not set",
-            inline=False
-        )
-        embed.add_field(
-            name="Max Tickets per User",
-            value=settings['max_tickets'],
-            inline=True
-        )
-        embed.add_field(
-            name="Ticket Format",
-            value=f"`{settings['ticket_format']}`",
-            inline=True
-        )
-        embed.add_field(
-            name="Auto Close Hours",
-            value=settings['auto_close_hours'],
-            inline=True
-        )
-        
-        await ctx.send(embed=embed)
 
 async def setup(bot):
     """Setup the Ticket cog"""
-    cog = TicketSystem(bot)
-    cog.setup_tables()  # Setup tables before adding cog
-    await bot.add_cog(cog)
+    await bot.add_cog(TicketSystem(bot))
