@@ -1,8 +1,8 @@
 """
 Admin Commands Cog
 Author: fdyytu1
-Created at: 2025-03-12 14:08:55 UTC
-Last Modified: 2025-03-13 16:07:00 UTC
+Created at: 2025-03-14 01:59:43 UTC
+Last Modified: 2025-03-14 02:10:00 UTC
 """
 
 import discord
@@ -16,6 +16,7 @@ import io
 import os
 import psutil
 import platform
+import hashlib
 
 from ext.constants import (
     Status,              
@@ -26,7 +27,8 @@ from ext.constants import (
     CURRENCY_RATES,     
     MAX_STOCK_FILE_SIZE,
     VALID_STOCK_FORMATS,
-    Permissions 
+    Permissions,
+    Stock 
 )
 
 # Import services
@@ -80,8 +82,10 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             return
     
         try:
+            # Execute the command function
             await execute_func()
-            await self.command_handler.handle_command(ctx, command_name)
+            # Log command success without sending response again
+            await self.command_handler.handle_command(ctx, command_name, send_response=False)
         except Exception as e:
             self.logger.error(f"Error executing {command_name}: {str(e)}")
             error_msg = str(e) if isinstance(e, ValueError) else "An error occurred while processing the command"
@@ -104,8 +108,14 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
     async def add_product(self, ctx, code: str, name: str, price: int, *, description: str = None):
         """Add new product"""
         async def execute():
+            if price < Stock.MIN_PRICE:
+                raise ValueError(f"Price cannot be lower than {Stock.MIN_PRICE}")
+            
+            if price > Stock.MAX_PRICE:
+                raise ValueError(f"Price cannot be higher than {Stock.MAX_PRICE:,}")
+                
             response = await self.product_service.create_product(
-                code=code,
+                code=code.upper(),
                 name=name,
                 price=price,
                 description=description
@@ -124,7 +134,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 name="Details",
                 value=(
                     f"```yml\n"
-                    f"Code: {code}\n"
+                    f"Code: {code.upper()}\n"
                     f"Name: {name}\n"
                     f"Price: {price:,} WLS\n"
                     f"Description: {description or 'N/A'}\n"
@@ -142,6 +152,11 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
     async def edit_product(self, ctx, code: str, field: str, *, value: str):
         """Edit product details"""
         async def execute():
+            # Check if product exists
+            product = await self.product_service.get_product(code.upper())
+            if not product:
+                raise ValueError(f"Product with code {code.upper()} not found")
+                
             valid_fields = ['name', 'price', 'description']
             field = field.lower()
             
@@ -150,14 +165,18 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 
             if field == 'price':
                 try:
-                    value = int(value)
+                    price = int(value)
+                    if price < Stock.MIN_PRICE:
+                        raise ValueError(f"Price cannot be lower than {Stock.MIN_PRICE}")
+                    if price > Stock.MAX_PRICE:
+                        raise ValueError(f"Price cannot be higher than {Stock.MAX_PRICE:,}")
                 except ValueError:
                     raise ValueError("Price must be a number")
                     
             response = await self.product_service.update_product(
-                code=code,
+                code=code.upper(),
                 field=field,
-                value=value,
+                value=value if field != 'price' else int(value),
                 updated_by=str(ctx.author)
             )
             
@@ -174,7 +193,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 name="Details",
                 value=(
                     f"```yml\n"
-                    f"Code: {code}\n"
+                    f"Code: {code.upper()}\n"
                     f"Updated Field: {field}\n"
                     f"New Value: {value}\n"
                     f"```"
@@ -193,12 +212,12 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
         async def execute():
             if not await self._confirm_action(
                 ctx,
-                f"Are you sure you want to delete product {code}?"
+                f"Are you sure you want to delete product {code.upper()}?"
             ):
                 raise ValueError("Operation cancelled by user")
                 
             response = await self.product_service.delete_product(
-                code=code,
+                code=code.upper(),
                 deleted_by=str(ctx.author)
             )
             
@@ -207,7 +226,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 
             embed = discord.Embed(
                 title="✅ Product Deleted",
-                description=f"Product {code} has been deleted",
+                description=f"Product {code.upper()} has been deleted",
                 color=COLORS.SUCCESS,
                 timestamp=datetime.now(timezone.utc)
             )
@@ -221,6 +240,11 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
     async def add_stock(self, ctx, code: str):
         """Add stock with file attachment"""
         async def execute():
+            # Check if product exists
+            product = await self.product_service.get_product(code.upper())
+            if not product:
+                raise ValueError(f"Product with code {code.upper()} not found")
+                
             if not ctx.message.attachments:
                 raise ValueError("Please attach a file containing stock items")
                 
@@ -240,7 +264,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             
             for item in content:
                 response = await self.product_service.add_stock_item(
-                    product_code=code,
+                    product_code=code.upper(),
                     content=item.strip(),
                     added_by=str(ctx.author)
                 )
@@ -251,7 +275,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                     failed_items.append(f"{item}: {response.error}")
             
             # Get current stock count
-            stock_count = await self.product_service.get_stock_count(code)
+            stock_count = await self.product_service.get_stock_count(code.upper())
             if not stock_count.success:
                 raise ValueError(stock_count.error)
             
@@ -265,7 +289,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 name="Summary",
                 value=(
                     f"```yml\n"
-                    f"Product: {code}\n"
+                    f"Product: {code.upper()}\n"
                     f"Successfully Added: {added_count}/{len(content)}\n"
                     f"Current Total Stock: {stock_count.data}\n"
                     f"```"
@@ -326,35 +350,35 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
         await self._process_command(ctx, "addworld", execute)
 
     @commands.command(name="addbal")
-    async def add_balance(self, ctx, growid: str, amount: int, currency: str):
+    async def add_balance(self, ctx, growid: str, amount: str, currency: str):
         """Add balance to user"""
         async def execute():
             try:
                 currency_upper = currency.upper()
-                if currency_upper not in CURRENCY_RATES.RATES:
-                    raise ValueError(f"Invalid currency. Use: {', '.join(CURRENCY_RATES.RATES.keys())}")
+                if currency_upper not in CURRENCY_RATES.SUPPORTED:
+                    raise ValueError(f"Invalid currency. Use: {', '.join(CURRENCY_RATES.SUPPORTED)}")
+                
+                try:
+                    amount = int(amount.replace(',', ''))
+                except ValueError:
+                    raise ValueError("Amount must be a number")
                 
                 if amount <= 0:
                     raise ValueError("Amount must be positive!")
-    
-                # Convert to WL based on currency
-                if currency_upper == "WL":
-                    wls = amount
-                elif currency_upper == "DL":
-                    wls = amount * CURRENCY_RATES.RATES['DL']
-                elif currency_upper == "BGL":
-                    wls = amount * CURRENCY_RATES.RATES['BGL']
+
+                # Convert to WL using CURRENCY_RATES method
+                wls = CURRENCY_RATES.to_wl(amount, currency_upper)
                 
                 response = await self.balance_service.update_balance(
                     growid=growid,
-                    wl=wls,  # Gunakan wls langsung
-                    details=f"Added {amount} {currency_upper} by admin {ctx.author}",
-                    transaction_type=TransactionType.ADMIN_ADD.value
+                    wl=wls,  # Use converted amount
+                    details=f"Added {amount:,} {currency_upper} by admin {ctx.author}",
+                    transaction_type=TransactionType.ADMIN_ADD
                 )
                 
                 if not response.success:
                     raise ValueError(response.error)
-                    
+                
                 embed = discord.Embed(
                     title="✅ Balance Added",
                     color=COLORS.SUCCESS,
@@ -378,54 +402,73 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 
             except Exception as e:
                 raise ValueError(str(e))
-    
+
         await self._process_command(ctx, "addbal", execute)
 
     @commands.command(name="removebal")
-    async def remove_balance(self, ctx, growid: str, amount: int, currency: str):
+    async def remove_balance(self, ctx, growid: str, amount: str, currency: str):
         """Remove balance from user"""
         async def execute():
-            currency = currency.upper()
-            if currency not in CURRENCY_RATES:
-                raise ValueError(f"Invalid currency. Use: {', '.join(CURRENCY_RATES.keys())}")
-            
-            if amount <= 0:
-                raise ValueError("Amount must be positive!")
-
-            wls = -(amount if currency == "WL" else amount * CURRENCY_RATES[currency])
-            
-            response = await self.balance_service.update_balance(
-                growid=growid,
-                amount=wls,
-                currency="WL",
-                details=f"Removed by admin {ctx.author}",
-                transaction_type=TransactionType.ADMIN_REMOVE
-            )
-            
-            if not response.success:
-                raise ValueError(response.error)
+            try:
+                currency_upper = currency.upper()
+                if currency_upper not in CURRENCY_RATES.SUPPORTED:
+                    raise ValueError(f"Invalid currency. Use: {', '.join(CURRENCY_RATES.SUPPORTED)}")
                 
-            embed = discord.Embed(
-                title="✅ Balance Removed",
-                color=COLORS.SUCCESS,
-                timestamp=datetime.now(timezone.utc)
-            )
-            
-            embed.add_field(
-                name="💰 Balance Details",
-                value=(
-                    f"```yml\n"
-                    f"GrowID: {growid}\n"
-                    f"Removed: {amount:,} {currency}\n"
-                    f"New Balance: {response.data.format()}\n"
-                    f"```"
-                ),
-                inline=False
-            )
-            
-            embed.set_footer(text=f"Removed by {ctx.author}")
-            await self.send_response_once(ctx, embed=embed)
-            
+                try:
+                    amount = int(amount.replace(',', ''))
+                except ValueError:
+                    raise ValueError("Amount must be a number")
+                    
+                if amount <= 0:
+                    raise ValueError("Amount must be positive!")
+
+                # Get current balance first
+                balance_check = await self.balance_service.get_balance(growid)
+                if not balance_check.success:
+                    raise ValueError(balance_check.error)
+                
+                # Convert to WL using CURRENCY_RATES method
+                wls = CURRENCY_RATES.to_wl(amount, currency_upper)
+                
+                # Check if user has enough balance
+                current_balance = balance_check.data
+                if wls > current_balance.total_wl():
+                    raise ValueError(MESSAGES.ERROR['INSUFFICIENT_BALANCE'])
+
+                response = await self.balance_service.update_balance(
+                    growid=growid,
+                    wl=-wls,  # Use negative value for removal
+                    details=f"Removed {amount:,} {currency_upper} by admin {ctx.author}",
+                    transaction_type=TransactionType.ADMIN_REMOVE
+                )
+                
+                if not response.success:
+                    raise ValueError(response.error)
+                    
+                embed = discord.Embed(
+                    title="✅ Balance Removed",
+                    color=COLORS.SUCCESS,
+                    timestamp=datetime.now(timezone.utc)
+                )
+                
+                embed.add_field(
+                    name="💰 Balance Details",
+                    value=(
+                        f"```yml\n"
+                        f"GrowID: {growid}\n"
+                        f"Removed: {amount:,} {currency_upper}\n"
+                        f"New Balance: {response.data.format()}\n"
+                        f"```"
+                    ),
+                    inline=False
+                )
+                
+                embed.set_footer(text=f"Removed by {ctx.author}")
+                await self.send_response_once(ctx, embed=embed)
+                
+            except Exception as e:
+                raise ValueError(str(e))
+                
         await self._process_command(ctx, "removebal", execute)
 
     @commands.command(name="checkbal")
@@ -438,7 +481,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
 
             # Get transaction history
             trx_response = await self.trx_manager.get_transaction_history(
-                growid=growid,
+                user_id=growid,
                 limit=5
             )
 
@@ -455,9 +498,10 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             )
 
             if trx_response.success and trx_response.data:
+                transactions = trx_response.data['transactions']
                 recent_tx = "\n".join([
-                    f"• {tx['type']} - {tx['timestamp']}: {tx['details']}"
-                    for tx in trx_response.data[:5]
+                    f"• {tx['type']} - {tx['formatted_date']}: {tx['amount_display']}"
+                    for tx in transactions[:5]
                 ])
                 embed.add_field(
                     name="📝 Recent Transactions",
@@ -480,9 +524,13 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             ):
                 raise ValueError("Operation cancelled by user")
 
-            response = await self.balance_service.reset_balance(
+            response = await self.balance_service.update_balance(
                 growid=growid,
-                reset_by=str(ctx.author)
+                wl=0,
+                dl=0,
+                bgl=0,
+                details=f"Balance reset by admin {ctx.author}",
+                transaction_type=TransactionType.ADMIN_RESET
             )
 
             if not response.success:
@@ -495,16 +543,11 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             )
             
             embed.add_field(
-                name="Previous Balance",
-                value=f"```yml\n{response.data['previous_balance'].format()}\n```",
+                name="Details",
+                value=f"```yml\nGrowID: {growid}\nNew Balance: 0 WL\n```",
                 inline=False
             )
             
-            embed.add_field(
-                name="New Balance",
-                value=f"```yml\n{response.data['new_balance'].format()}\n```",
-                inline=False
-            )
             embed.set_footer(text=f"Reset by {ctx.author}")
             await self.send_response_once(ctx, embed=embed)
             
@@ -515,19 +558,22 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
         """View transaction history"""
         async def execute():
             if limit < 1 or limit > 50:
-                raise ValueError("Limit must be between 1 and 50")
+                limit = min(max(1, limit), 50)
 
             response = await self.trx_manager.get_transaction_history(
-                growid=growid,
+                user_id=growid,
                 limit=limit
             )
 
             if not response.success:
                 raise ValueError(response.error)
 
-            transactions = response.data
-            if not transactions:
+            if not response.data['transactions']:
                 raise ValueError("No transactions found")
+
+            transactions = response.data['transactions']
+            current_page = response.data['current_page']
+            total_pages = response.data['total_pages']
 
             embed = discord.Embed(
                 title=f"📜 Transaction History - {growid}",
@@ -537,7 +583,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
 
             for tx in transactions:
                 embed.add_field(
-                    name=f"{tx['type']} - {tx['timestamp']}",
+                    name=f"{tx['type']} - {tx['formatted_date']}",
                     value=(
                         f"```yml\n"
                         f"Amount: {tx['amount_display']}\n"
@@ -547,7 +593,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                     inline=False
                 )
 
-            embed.set_footer(text=f"Showing {len(transactions)} transactions")
+            embed.set_footer(text=f"Page {current_page}/{total_pages} • Showing {len(transactions)} transactions")
             await self.send_response_once(ctx, embed=embed)
             
         await self._process_command(ctx, "trxhistory", execute)
@@ -557,10 +603,10 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
         """View stock history"""
         async def execute():
             if limit < 1 or limit > 50:
-                raise ValueError("Limit must be between 1 and 50")
+                limit = min(max(1, limit), 50)
 
             response = await self.product_service.get_stock_history(
-                code=code,
+                code=code.upper(),
                 limit=limit
             )
 
@@ -572,7 +618,7 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
                 raise ValueError("No stock history found")
 
             embed = discord.Embed(
-                title=f"📦 Stock History - {code}",
+                title=f"📦 Stock History - {code.upper()}",
                 color=COLORS.INFO,
                 timestamp=datetime.now(timezone.utc)
             )
@@ -600,7 +646,6 @@ class AdminCog(commands.Cog, BaseLockHandler, BaseResponseHandler):
             await self.send_response_once(ctx, embed=embed)
             
         await self._process_command(ctx, "stockhistory", execute)
-
 
     @commands.command(name="systeminfo")
     async def system_info(self, ctx):
