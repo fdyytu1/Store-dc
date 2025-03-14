@@ -1,8 +1,8 @@
 """
 Product Manager Service
-Author: fdyyuk
+Author: fdyytu
 Created at: 2025-03-07 18:04:56 UTC
-Last Modified: 2025-03-08 14:17:31 UTC
+Last Modified: 2025-03-14 06:40:42 UTC
 """
 
 import logging
@@ -205,7 +205,7 @@ class ProductManagerService(BaseLockHandler):
             # Trigger callback
             await self.callback_manager.trigger('product_created', result)
             
-            return ProductResponse.success(result, MESSAGES.SUCCESS['PRODUCT_CREATED'])
+            return ProductResponse.success(result, "Product created successfully")
 
         except Exception as e:
             self.logger.error(f"Error creating product: {e}")
@@ -293,72 +293,91 @@ class ProductManagerService(BaseLockHandler):
             self.release_lock("products_getall")
 
     async def add_stock_item(self, product_code: str, content: str, added_by: str) -> ProductResponse:
-        """Add stock item dengan enhanced duplicate checking"""
-        # Buat unique lock key berdasarkan content
-        content_hash = hashlib.md5(content.encode()).hexdigest()
-        lock_key = f"stock_add_{product_code}_{content_hash}"
-        
-        lock = await self.acquire_lock(lock_key)
-        if not lock:
-            return ProductResponse.error(MESSAGES.ERROR['TRANSACTION_FAILED'])
-    
-        conn = None
+        """Add stock item dengan validasi dan enhanced duplicate checking"""
         try:
-            conn = get_connection()
-            cursor = conn.cursor()
+            # Validasi content: pastikan tidak kosong dan hanya 1 baris
+            content = content.strip()
+            if not content:
+                return ProductResponse.error("Content cannot be empty")
+            if '\n' in content:
+                return ProductResponse.error("Content must be single line")
+
+            # Buat unique lock key berdasarkan content
+            content_hash = hashlib.md5(content.encode()).hexdigest()
+            lock_key = f"stock_add_{product_code}_{content_hash}"
             
-            # Check duplicates dengan index
-            cursor.execute("""
-                SELECT id FROM stock 
-                WHERE product_code = ? AND content = ? 
-                AND status != ?
-            """, (product_code, content, Status.DELETED.value))
+            max_retries = 3
+            retry_delay = 1.0
             
-            if cursor.fetchone():
-                return ProductResponse.error("Duplicate stock content detected")
-                
-            # Verify product exists
-            cursor.execute(
-                "SELECT code FROM products WHERE code = ? COLLATE NOCASE",
-                (product_code,)
-            )
-            if not cursor.fetchone():
-                return ProductResponse.error(MESSAGES.ERROR['PRODUCT_NOT_FOUND'])
-            
-            # Check stock limit
-            current_stock = await self.get_stock_count(product_code)
-            if current_stock >= Stock.MAX_STOCK:
-                return ProductResponse.error(f"Stock limit reached ({Stock.MAX_STOCK})")
-            
-            cursor.execute(
-                """
-                INSERT INTO stock (product_code, content, added_by, status)
-                VALUES (?, ?, ?, ?)
-                """,
-                (product_code, content, added_by, Status.AVAILABLE.value)
-            )
-            
-            conn.commit()
-            
-            # Invalidate caches
-            await self.cache_manager.delete(f"stock_count_{product_code}")
-            await self.cache_manager.delete(f"stock_{product_code}")
-            
-            # Trigger callback
-            await self.callback_manager.trigger('stock_added', product_code, 1, added_by)
-            
-            return ProductResponse.success(None, MESSAGES.SUCCESS['STOCK_ADDED'])
+            for attempt in range(max_retries):
+                lock = await self.acquire_lock(lock_key, timeout=10.0)
+                if lock:
+                    conn = None
+                    try:
+                        conn = get_connection()
+                        cursor = conn.cursor()
+                        
+                        # Check duplicates
+                        cursor.execute("""
+                            SELECT id FROM stock 
+                            WHERE product_code = ? AND content = ? 
+                            AND status != ?
+                        """, (product_code, content, Status.DELETED.value))
+                        
+                        if cursor.fetchone():
+                            return ProductResponse.error("Duplicate stock content detected")
+                            
+                        # Verify product exists
+                        cursor.execute(
+                            "SELECT code FROM products WHERE code = ? COLLATE NOCASE",
+                            (product_code,)
+                        )
+                        if not cursor.fetchone():
+                            return ProductResponse.error(MESSAGES.ERROR['PRODUCT_NOT_FOUND'])
+                        
+                        # Check stock limit
+                        current_stock_response = await self.get_stock_count(product_code)
+                        if current_stock_response.success:
+                            if current_stock_response.data >= Stock.MAX_STOCK:
+                                return ProductResponse.error(f"Stock limit reached ({Stock.MAX_STOCK})")
+                        
+                        cursor.execute(
+                            """
+                            INSERT INTO stock (product_code, content, added_by, status)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (product_code, content, added_by, Status.AVAILABLE.value)
+                        )
+                        
+                        conn.commit()
+                        
+                        # Invalidate caches
+                        await self.cache_manager.delete(f"stock_count_{product_code}")
+                        await self.cache_manager.delete(f"stock_{product_code}")
+                        
+                        # Trigger callback
+                        await self.callback_manager.trigger('stock_added', product_code, 1, added_by)
+                        
+                        return ProductResponse.success(None, "Stock added successfully")
+
+                    except Exception as e:
+                        self.logger.error(f"Error adding stock item: {e}")
+                        if conn:
+                            conn.rollback()
+                        return ProductResponse.error(str(e))
+                    finally:
+                        if conn:
+                            conn.close()
+                        self.release_lock(lock_key)
+                else:
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    return ProductResponse.error("Failed to acquire lock for adding stock")
 
         except Exception as e:
-            self.logger.error(f"Error adding stock item: {e}")
-            if conn:
-                conn.rollback()
-            await self.callback_manager.trigger('error', 'add_stock_item', str(e))
-            return ProductResponse.error(str(e))
-        finally:
-            if conn:
-                conn.close()
-            self.release_lock(f"stock_add_{product_code}")
+            self.logger.error(f"Unexpected error in add_stock_item: {e}")
+            return ProductResponse.error(f"Unexpected error: {str(e)}")
 
     async def get_available_stock(self, product_code: str, quantity: int = 1) -> ProductResponse:
         """Get available stock with proper locking"""
@@ -612,6 +631,7 @@ class ProductManagerService(BaseLockHandler):
             self.logger.info("ProductManagerService cleanup completed")
         except Exception as e:
             self.logger.error(f"Error during ProductManagerService cleanup: {e}")
+
     async def verify_dependencies(self) -> bool:
         """Verify all required dependencies are available"""
         try:
@@ -657,3 +677,17 @@ async def setup(bot):
             f'ProductManager cog loaded successfully at '
             f'{datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")} UTC'
         )
+
+async def teardown(bot):
+    """Cleanup when extension is unloaded"""
+    try:
+        if hasattr(bot, 'product_manager_loaded'):
+            cog = bot.get_cog('ProductManagerCog')
+            if cog:
+                await bot.remove_cog('ProductManagerCog')
+                if hasattr(cog, 'product_manager'):
+                    await cog.product_manager.cleanup()
+            delattr(bot, 'product_manager_loaded')
+            logging.info("ProductManager extension unloaded successfully")
+    except Exception as e:
+        logging.error(f"Error unloading ProductManager extension: {e}")
