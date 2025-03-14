@@ -1,9 +1,10 @@
 import asyncio
 from asyncio import Lock
 import logging
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple
 from discord.ext import commands
 import discord
+from ext.cache_manager import CacheManager
 
 class BaseLockHandler:
     """Handler untuk sistem locking"""
@@ -42,13 +43,7 @@ class BaseLockHandler:
             True jika berhasil acquire lock, False jika gagal
         """
         try:
-            # Gunakan message.id untuk Context dan interaction.id untuk Interaction
-            if isinstance(ctx_or_interaction, commands.Context):
-                key = str(ctx_or_interaction.message.id)
-            elif isinstance(ctx_or_interaction, discord.Interaction):
-                key = str(ctx_or_interaction.id)
-            else:
-                key = str(id(ctx_or_interaction))  # Fallback menggunakan object id
+            key = self._get_response_key(ctx_or_interaction)
                 
             if key not in self._response_locks:
                 self._response_locks[key] = Lock()
@@ -70,13 +65,7 @@ class BaseLockHandler:
     def release_response_lock(self, ctx_or_interaction):
         """Release response lock untuk context/interaction"""
         try:
-            # Gunakan message.id untuk Context dan interaction.id untuk Interaction
-            if isinstance(ctx_or_interaction, commands.Context):
-                key = str(ctx_or_interaction.message.id)
-            elif isinstance(ctx_or_interaction, discord.Interaction):
-                key = str(ctx_or_interaction.id)
-            else:
-                key = str(id(ctx_or_interaction))  # Fallback menggunakan object id
+            key = self._get_response_key(ctx_or_interaction)
                 
             if key in self._response_locks and self._response_locks[key].locked():
                 try:
@@ -98,59 +87,109 @@ class BaseLockHandler:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Cleanup saat exit context"""
         self.cleanup()
+        
+    def _get_response_key(self, ctx_or_interaction) -> str:
+        """Get unique key untuk response"""
+        if isinstance(ctx_or_interaction, commands.Context):
+            return f"ctx_{ctx_or_interaction.message.id}"
+        elif isinstance(ctx_or_interaction, discord.Interaction):
+            return f"interaction_{ctx_or_interaction.id}"
+        return f"other_{id(ctx_or_interaction)}"
 
 class BaseResponseHandler:
     """Handler untuk mengirim response dengan aman"""
     
-    async def send_response_once(self, ctx_or_interaction, **kwargs):
+    def __init__(self):
+        self.cache_manager = CacheManager()
+        self.logger = logging.getLogger(self.__class__.__name__)
+    
+    async def send_response_once(self, ctx_or_interaction, **kwargs) -> Tuple[bool, Optional[str]]:
         """
         Kirim response sekali saja, mendukung Context dan Interaction
         
         Args:
             ctx_or_interaction: Context atau Interaction object
             **kwargs: Argument untuk send/response.send_message
+            
+        Returns:
+            Tuple[bool, Optional[str]]: (success, error_message)
         """
+        key = self._get_response_key(ctx_or_interaction)
+        
+        # Check if response already sent
+        if await self.cache_manager.get(f"response:{key}"):
+            return False, "Response already sent"
+            
         try:
             if isinstance(ctx_or_interaction, discord.Interaction):
-                # Handling untuk Interaction
                 if not ctx_or_interaction.response.is_done():
                     await ctx_or_interaction.response.send_message(**kwargs)
                 else:
                     await ctx_or_interaction.followup.send(**kwargs)
             else:
-                # Handling untuk Context
                 await ctx_or_interaction.send(**kwargs)
                 
+            # Mark response as sent
+            await self.cache_manager.set(
+                f"response:{key}",
+                True,
+                expires_in=60  # Expire after 1 minute
+            )
+            return True, None
+                
         except discord.errors.NotFound:
-            self.logger.warning("Attempted to respond to a deleted message/interaction")
+            error_msg = "Message/interaction was deleted"
+            self.logger.warning(error_msg)
+            return False, error_msg
         except discord.errors.Forbidden:
-            self.logger.warning("Bot doesn't have permission to send message")
+            error_msg = "Bot doesn't have permission to send message"
+            self.logger.warning(error_msg)
+            return False, error_msg
         except Exception as e:
-            self.logger.error(f"Error sending response: {e}")
+            error_msg = f"Error sending response: {str(e)}"
+            self.logger.error(error_msg)
+            return False, error_msg
 
-    async def edit_response_safely(self, ctx_or_interaction, **kwargs):
+    async def edit_response_safely(self, ctx_or_interaction, **kwargs) -> Tuple[bool, Optional[str]]:
         """
         Edit response dengan aman
         
         Args:
             ctx_or_interaction: Context atau Interaction object
             **kwargs: Argument untuk edit
+            
+        Returns:
+            Tuple[bool, Optional[str]]: (success, error_message)
         """
         try:
             if isinstance(ctx_or_interaction, discord.Interaction):
-                # Handling untuk Interaction
                 if ctx_or_interaction.response.is_done():
                     await ctx_or_interaction.edit_original_response(**kwargs)
                 else:
                     await ctx_or_interaction.response.send_message(**kwargs)
             else:
-                # Handling untuk Context
                 if hasattr(ctx_or_interaction, 'message'):
                     await ctx_or_interaction.message.edit(**kwargs)
                     
+            return True, None
+                    
         except discord.errors.NotFound:
-            self.logger.warning("Attempted to edit a deleted message/interaction")
+            error_msg = "Message/interaction was deleted"
+            self.logger.warning(error_msg)
+            return False, error_msg
         except discord.errors.Forbidden:
-            self.logger.warning("Bot doesn't have permission to edit message")
+            error_msg = "Bot doesn't have permission to edit message"
+            self.logger.warning(error_msg)
+            return False, error_msg
         except Exception as e:
-            self.logger.error(f"Error editing response: {e}")
+            error_msg = f"Error editing response: {str(e)}"
+            self.logger.error(error_msg)
+            return False, error_msg
+            
+    def _get_response_key(self, ctx_or_interaction) -> str:
+        """Get unique key untuk response"""
+        if isinstance(ctx_or_interaction, commands.Context):
+            return f"ctx_{ctx_or_interaction.message.id}"
+        elif isinstance(ctx_or_interaction, discord.Interaction):
+            return f"interaction_{ctx_or_interaction.id}"
+        return f"other_{id(ctx_or_interaction)}"
