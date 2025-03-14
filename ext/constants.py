@@ -272,7 +272,9 @@ class Stock:
     ALERT_THRESHOLD = 10
     MAX_STOCK = 999999
     MIN_STOCK = 0
-
+    MIN_PRICE = 1  # Tambahkan ini
+    MAX_PRICE = 1000000  # Tambahkan ini juga untuk batas atas
+    
 # Discord Colors
 class COLORS:
     SUCCESS = discord.Color.green()
@@ -411,6 +413,7 @@ class BUTTON_IDS:
     CONFIRM_PURCHASE = "confirm_purchase"
     CANCEL_PURCHASE = "cancel_purchase"
     HISTORY = "history"
+    CHECK_GROWID = "check_growid"  
     # Ticket Buttons
     TICKET_CREATE = "create_ticket"       # Tambahkan ini
     TICKET_CLOSE = "close_ticket"         # Tambahkan ini
