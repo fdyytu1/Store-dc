@@ -231,77 +231,77 @@ class LiveStockManager(BaseLockHandler):
             )
 
     def _format_price(self, price: float) -> str:
-        """Format price dengan currency rates dari constants"""
         try:
-            if price >= CURRENCY_RATES['BGL']:
-                return f"\u001b[0;35m{price/CURRENCY_RATES['BGL']:.1f} BGL\u001b[0m"
-            elif price >= CURRENCY_RATES['DL']:
-                return f"\u001b[0;34m{price/CURRENCY_RATES['DL']:.0f} DL\u001b[0m"
+            if price >= CURRENCY_RATES.RATES['BGL']:
+                return f"\u001b[0;35m{price/CURRENCY_RATES.RATES['BGL']:.1f} BGL\u001b[0m"
+            elif price >= CURRENCY_RATES.RATES['DL']:
+                return f"\u001b[0;34m{price/CURRENCY_RATES.RATES['DL']:.0f} DL\u001b[0m"
             return f"\u001b[0;32m{int(price)} WL\u001b[0m"
-        except Exception:
+        except Exception as e:
+            self.logger.error(f"Error formatting price: {e}")
             return "Invalid Price"
-
-    async def update_stock_display(self) -> bool:
-        """Update tampilan stock tanpa mengirim pesan baru"""
-        try:
-            channel = self.bot.get_channel(self.stock_channel_id)
-            if not channel:
-                self.logger.error(f"Channel stock dengan ID {self.stock_channel_id} tidak ditemukan")
-                return False
-
-            embed = await self.create_stock_embed()
-
-            # Cari pesan yang ada jika belum ada current_message
-            if not self.current_stock_message:
-                self.current_stock_message = await self.find_last_message()
-
-            if not self.current_stock_message:
-                # Buat pesan baru jika tidak ada yang ditemukan
-                view = self.button_manager.create_view() if self.button_manager else None
-                self.current_stock_message = await channel.send(embed=embed, view=view)
-                return True
-
+    
+        async def update_stock_display(self) -> bool:
+            """Update tampilan stock tanpa mengirim pesan baru"""
             try:
-                # Update pesan yang ada
-                await self.current_stock_message.edit(embed=embed)
-                return True
-
-            except discord.NotFound:
-                self.logger.warning(MESSAGES.WARNING['MESSAGE_NOT_FOUND'])
-                self.current_stock_message = None
-                # Buat pesan baru karena pesan lama tidak ditemukan
-                view = self.button_manager.create_view() if self.button_manager else None
-                self.current_stock_message = await channel.send(embed=embed, view=view)
-                return True
-
-        except Exception as e:
-            self.logger.error(f"Error updating stock display: {e}")
-            return False
-
-    async def cleanup(self):
-        """Cleanup resources dengan proper error handling"""
-        try:
-            if self.current_stock_message:
-                embed = discord.Embed(
-                    title="🔧 Maintenance",
-                    description=MESSAGES.INFO['MAINTENANCE'],
-                    color=COLORS.WARNING
-                )
-                await self.current_stock_message.edit(embed=embed)
-
-            # Clear caches dengan pattern yang spesifik
-            patterns = [
-                'live_stock_*',
-                'stock_count_*',
-                'all_products_display'
-            ]
-            for pattern in patterns:
-                await self.cache_manager.delete_pattern(pattern)
-
-            self.logger.info("LiveStockManager cleanup completed")
-
-        except Exception as e:
-            self.logger.error(f"Error in cleanup: {e}")
+                channel = self.bot.get_channel(self.stock_channel_id)
+                if not channel:
+                    self.logger.error(f"Channel stock dengan ID {self.stock_channel_id} tidak ditemukan")
+                    return False
+    
+                embed = await self.create_stock_embed()
+    
+                # Cari pesan yang ada jika belum ada current_message
+                if not self.current_stock_message:
+                    self.current_stock_message = await self.find_last_message()
+    
+                if not self.current_stock_message:
+                    # Buat pesan baru jika tidak ada yang ditemukan
+                    view = self.button_manager.create_view() if self.button_manager else None
+                    self.current_stock_message = await channel.send(embed=embed, view=view)
+                    return True
+    
+                try:
+                    # Update pesan yang ada
+                    await self.current_stock_message.edit(embed=embed)
+                    return True
+    
+                except discord.NotFound:
+                    self.logger.warning(MESSAGES.WARNING['MESSAGE_NOT_FOUND'])
+                    self.current_stock_message = None
+                    # Buat pesan baru karena pesan lama tidak ditemukan
+                    view = self.button_manager.create_view() if self.button_manager else None
+                    self.current_stock_message = await channel.send(embed=embed, view=view)
+                    return True
+    
+            except Exception as e:
+                self.logger.error(f"Error updating stock display: {e}")
+                return False
+    
+        async def cleanup(self):
+            """Cleanup resources dengan proper error handling"""
+            try:
+                if self.current_stock_message:
+                    embed = discord.Embed(
+                        title="🔧 Maintenance",
+                        description=MESSAGES.INFO['MAINTENANCE'],
+                        color=COLORS.WARNING
+                    )
+                    await self.current_stock_message.edit(embed=embed)
+    
+                # Clear caches dengan pattern yang spesifik
+                patterns = [
+                    'live_stock_*',
+                    'stock_count_*',
+                    'all_products_display'
+                ]
+                for pattern in patterns:
+                    await self.cache_manager.delete_pattern(pattern)
+    
+                self.logger.info("LiveStockManager cleanup completed")
+    
+            except Exception as e:
+                self.logger.error(f"Error in cleanup: {e}")
 
 class LiveStockCog(commands.Cog):
     def __init__(self, bot):
