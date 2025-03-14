@@ -320,7 +320,8 @@ class AdvancedCommandHandler:
             permanent=True
         )
 
-    async def handle_command(self, ctx: commands.Context, command_name: str) -> None:
+# Line 323-375
+    async def handle_command(self, ctx: commands.Context, command_name: str, send_response: bool = True) -> None:
         """Handle command dengan better error handling dan logging"""
         try:
             # Validate command exists
@@ -328,24 +329,27 @@ class AdvancedCommandHandler:
             if not command:
                 logger.error(f"Command not found: {command_name}")
                 return
-
-            # Rate Limit Check dengan custom response
+    
+            # Rate Limit Check (tanpa response jika send_response=False)
             if not await self.check_rate_limit(ctx):
-                cooldown_msg = "🚫 You're sending commands too fast! Please slow down."
-                await ctx.send(cooldown_msg, delete_after=5)
+                if send_response:
+                    cooldown_msg = "🚫 You're sending commands too fast! Please slow down."
+                    await ctx.send(cooldown_msg, delete_after=5)
                 return
                 
-            # Permission Check dengan detailed response
+            # Permission Check (tanpa response jika send_response=False)
             if not await self.check_permissions(ctx, command_name):
-                perm_msg = "❌ You don't have permission to use this command!"
-                await ctx.send(perm_msg, delete_after=5)
+                if send_response:
+                    perm_msg = "❌ You don't have permission to use this command!"
+                    await ctx.send(perm_msg, delete_after=5)
                 return
                 
-            # Cooldown Check dengan accurate timing
+            # Cooldown Check (tanpa response jika send_response=False)
             can_run, remaining = await self.check_cooldown(ctx.author.id, command_name)
             if not can_run:
-                cooldown_msg = f"⏰ Please wait {remaining:.1f}s before using this command again!"
-                await ctx.send(cooldown_msg, delete_after=5)
+                if send_response:
+                    cooldown_msg = f"⏰ Please wait {remaining:.1f}s before using this command again!"
+                    await ctx.send(cooldown_msg, delete_after=5)
                 return
                 
             # Track command usage
@@ -359,17 +363,19 @@ class AdvancedCommandHandler:
             await self.analytics.track_error(command_name, e, ctx)
             await self.log_command(ctx, command_name, False, e)
             
-            # Custom error messages
-            error_message = "❌ An error occurred while executing the command!"
-            
-            if isinstance(e, commands.MissingPermissions):
-                error_message = "❌ You don't have the required permissions!"
-            elif isinstance(e, commands.CommandOnCooldown):
-                error_message = f"⏰ Please wait {e.retry_after:.1f}s before using this command again!"
-            elif isinstance(e, commands.MissingRequiredArgument):
-                error_message = f"❌ Missing required argument: {e.param.name}"
-            elif isinstance(e, commands.BadArgument):
-                error_message = "❌ Invalid argument provided!"
-            
+            if send_response:
+                # Custom error messages
+                error_message = "❌ An error occurred while executing the command!"
+                
+                if isinstance(e, commands.MissingPermissions):
+                    error_message = "❌ You don't have the required permissions!"
+                elif isinstance(e, commands.CommandOnCooldown):
+                    error_message = f"⏰ Please wait {e.retry_after:.1f}s before using this command again!"
+                elif isinstance(e, commands.MissingRequiredArgument):
+                    error_message = f"❌ Missing required argument: {e.param.name}"
+                elif isinstance(e, commands.BadArgument):
+                    error_message = "❌ Invalid argument provided!"
+                
+                await ctx.send(error_message, delete_after=5)
+                
             logger.error(f"Error in command {command_name}: {e}")
-            await ctx.send(error_message, delete_after=5)
