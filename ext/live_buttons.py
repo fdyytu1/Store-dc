@@ -1,8 +1,8 @@
 """
 Live Buttons Manager with Shop Integration
-Author: fdyytu
+Author: fdyytu1
 Created at: 2025-03-07 22:35:08 UTC
-Last Modified: 2025-03-14 14:49:29 UTC
+Last Modified: 2025-03-14 17:36:12 UTC
 
 Dependencies:
 - ext.product_manager: For product operations
@@ -42,47 +42,83 @@ from .balance_manager import BalanceManagerService
 from .trx import TransactionManager
 from .admin_service import AdminService
 
-class PurchaseConfirmView(discord.ui.View):
-    def __init__(self, product: Dict, max_quantity: int, balance_service, product_service, trx_manager):
-        super().__init__(timeout=300)  # 5 menit timeout
+class PurchaseQuantityModal(Modal):
+    def __init__(self, product: Dict, max_quantity: int):
+        super().__init__(title=f"🛒 Beli {product['name']}")
         self.product = product
         self.max_quantity = max_quantity
-        self.balance_service = balance_service
-        self.product_service = product_service
-        self.trx_manager = trx_manager
-        
-        # Tambahkan input quantity
-        self.quantity_input = discord.ui.TextInput(
-            label="Jumlah",
+
+        self.quantity = TextInput(
+            label="Jumlah yang ingin dibeli",
             placeholder=f"Maksimal {max_quantity}",
             min_length=1,
             max_length=3,
-            required=True,
-            style=discord.TextStyle.short
+            required=True
         )
-        self.add_item(self.quantity_input)
+        self.add_item(self.quantity)
 
-    @discord.ui.button(
-        label="✅ Konfirmasi Pembelian",
-        style=discord.ButtonStyle.success,
-        custom_id="confirm_purchase"
-    )
-    async def confirm_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+    async def on_submit(self, interaction: discord.Interaction):
         try:
-            quantity = int(self.quantity_input.value)
+            quantity = int(self.quantity.value)
             if quantity <= 0 or quantity > self.max_quantity:
                 raise ValueError(MESSAGES.ERROR['INVALID_AMOUNT'])
 
+            # Tampilkan konfirmasi pembelian
+            embed = discord.Embed(
+                title="🛒 Konfirmasi Pembelian",
+                color=COLORS.INFO
+            )
+
+            total_price = float(self.product['price']) * quantity
+            
+            embed.add_field(
+                name="Detail Pesanan",
+                value=(
+                    f"```yml\n"
+                    f"Produk: {self.product['name']}\n"
+                    f"Jumlah: {quantity}x\n"
+                    f"Harga Satuan: {self.product['price']} WL\n"
+                    f"Total Harga: {total_price} WL\n"
+                    "```"
+                ),
+                inline=False
+            )
+
+            view = PurchaseConfirmationView(self.product, quantity, total_price)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+        except ValueError as e:
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="❌ Error",
+                    description=str(e),
+                    color=COLORS.ERROR
+                ),
+                ephemeral=True
+            )
+
+class PurchaseConfirmationView(View):
+    def __init__(self, product: Dict, quantity: int, total_price: float):
+        super().__init__(timeout=300)  # 5 menit timeout
+        self.product = product
+        self.quantity = quantity
+        self.total_price = total_price
+        self.balance_service = BalanceManagerService()
+        self.trx_manager = TransactionManager()
+
+    @discord.ui.button(
+        label="✅ Konfirmasi Pembelian", 
+        style=discord.ButtonStyle.success
+    )
+    async def confirm(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.defer(ephemeral=True)
+        try:
             # Get user's GrowID
             growid_response = await self.balance_service.get_growid(str(interaction.user.id))
             if not growid_response.success:
                 raise ValueError(growid_response.error)
 
             growid = growid_response.data
-
-            # Calculate total price
-            total_price = float(self.product['price']) * quantity
 
             # Verify balance
             balance_response = await self.balance_service.get_balance(growid)
@@ -94,22 +130,24 @@ class PurchaseConfirmView(discord.ui.View):
                 raise ValueError(MESSAGES.ERROR['BALANCE_NOT_FOUND'])
 
             balance_wls = balance.total_wl()
-            if balance_wls < total_price:
+            if balance_wls < self.total_price:
                 raise ValueError(MESSAGES.ERROR['INSUFFICIENT_BALANCE'])
 
             # Process purchase
             purchase_response = await self.trx_manager.process_purchase(
                 growid=growid,
                 product_code=self.product['code'],
-                quantity=quantity,
-                price=total_price
+                quantity=self.quantity,
+                price=self.total_price
             )
 
             if not purchase_response.success:
                 raise ValueError(purchase_response.error)
 
-            # Disable buttons after successful purchase
-            self.disable_all_items()
+            # Disable buttons
+            for child in self.children:
+                child.disabled = True
+            await interaction.message.edit(view=self)
 
             # Send success message
             success_embed = discord.Embed(
@@ -122,8 +160,8 @@ class PurchaseConfirmView(discord.ui.View):
                 value=(
                     f"```yml\n"
                     f"Produk   : {self.product['name']}\n"
-                    f"Jumlah   : {quantity}x\n"
-                    f"Harga    : {total_price} WL\n"
+                    f"Jumlah   : {self.quantity}x\n"
+                    f"Total    : {self.total_price} WL\n"
                     f"GrowID   : {growid}\n"
                     "```"
                 ),
@@ -139,35 +177,24 @@ class PurchaseConfirmView(discord.ui.View):
                 color=COLORS.ERROR
             )
             await interaction.followup.send(embed=error_embed, ephemeral=True)
-        except Exception as e:
-            error_embed = discord.Embed(
-                title="❌ Error",
-                description=MESSAGES.ERROR['TRANSACTION_FAILED'],
-                color=COLORS.ERROR
-            )
-            await interaction.followup.send(embed=error_embed, ephemeral=True)
 
     @discord.ui.button(
-        label="❌ Batal",
-        style=discord.ButtonStyle.danger,
-        custom_id="cancel_purchase"
+        label="❌ Batal", 
+        style=discord.ButtonStyle.danger
     )
-    async def cancel_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Disable all buttons
-        self.disable_all_items()
+    async def cancel(self, interaction: discord.Interaction, button: Button):
+        for child in self.children:
+            child.disabled = True
+        await interaction.message.edit(view=self)
         
-        await interaction.response.edit_message(
+        await interaction.response.send_message(
             embed=discord.Embed(
-                title="❌ Pembelian Dibatalkan",
-                description="Pembelian telah dibatalkan",
+                title="❌ Dibatalkan",
+                description="Pembelian dibatalkan",
                 color=COLORS.ERROR
             ),
-            view=self
+            ephemeral=True
         )
-
-    def disable_all_items(self):
-        for item in self.children:
-            item.disabled = True
 
 class ProductSelect(Select):
     def __init__(self, products: List[Dict], balance_service, product_service, trx_manager):
@@ -194,61 +221,24 @@ class ProductSelect(Select):
     async def callback(self, interaction: discord.Interaction):
         try:
             selected_code = self.values[0]
+            product = self.products_cache.get(selected_code)
             
-            # Get product details
-            product_response = await self.product_service.get_product(selected_code)
-            if not product_response.success:
-                raise ValueError(product_response.error)
-            
-            selected_product = product_response.data
-    
-            # Verify stock
-            stock_response = await self.product_service.get_stock_count(selected_code)
-            if not stock_response.success:
-                raise ValueError(stock_response.error)
-    
-            current_stock = stock_response.data
-            if current_stock <= 0:
+            if not product:
+                raise ValueError(MESSAGES.ERROR['PRODUCT_NOT_FOUND'])
+
+            if product['stock'] <= 0:
                 raise ValueError(MESSAGES.ERROR['OUT_OF_STOCK'])
-    
-            # Verify user registration
-            growid_response = await self.balance_service.get_growid(str(interaction.user.id))
-            if not growid_response.success:
-                raise ValueError(growid_response.error)
 
-            # Buat view baru dengan input quantity dan tombol konfirmasi
-            view = PurchaseConfirmView(
-                selected_product,
-                current_stock,
-                self.balance_service,
-                self.product_service,
-                self.trx_manager
-            )
+            # Show quantity input modal
+            modal = PurchaseQuantityModal(product, min(product['stock'], 999))
+            await interaction.response.send_modal(modal)
 
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="🛒 Konfirmasi Pembelian",
-                    description=(
-                        f"```yml\n"
-                        f"Produk: {selected_product['name']}\n"
-                        f"Harga: {selected_product['price']} WL\n"
-                        f"Stok: {current_stock} unit\n"
-                        "```\n"
-                        "Masukkan jumlah yang ingin dibeli dan klik Konfirmasi"
-                    ),
-                    color=COLORS.INFO
-                ),
-                view=view,
-                ephemeral=True
-            )
-    
-        except Exception as e:
+        except ValueError as e:
             if not interaction.response.is_done():
-                error_msg = str(e) if isinstance(e, ValueError) else MESSAGES.ERROR['TRANSACTION_FAILED']
                 await interaction.response.send_message(
                     embed=discord.Embed(
                         title="❌ Error",
-                        description=error_msg,
+                        description=str(e),
                         color=COLORS.ERROR
                     ),
                     ephemeral=True
