@@ -56,6 +56,7 @@ class PurchaseQuantityModal(Modal):
             required=True
         )
         self.add_item(self.quantity)
+        self.bot = bot
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -84,7 +85,7 @@ class PurchaseQuantityModal(Modal):
                 inline=False
             )
 
-            view = PurchaseConfirmationView(self.product, quantity, total_price)
+            view = PurchaseConfirmationView(self.product, quantity, total_price, self.bot)  # Tambah self.bot
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
         except ValueError as e:
@@ -103,6 +104,7 @@ class PurchaseConfirmationView(View):
         self.product = product
         self.quantity = quantity
         self.total_price = total_price
+        self.bot = bot  # Tambah ini
         self.balance_service = BalanceManagerService()
         self.trx_manager = TransactionManager()
 
@@ -202,7 +204,8 @@ class ProductSelect(Select):
         self.balance_service = balance_service
         self.product_service = product_service
         self.trx_manager = trx_manager
-
+        self.bot = bot  # Tambah Ini
+        
         options = [
             discord.SelectOption(
                 label=f"{product['name']}",
@@ -230,7 +233,7 @@ class ProductSelect(Select):
                 raise ValueError(MESSAGES.ERROR['OUT_OF_STOCK'])
 
             # Show quantity input modal
-            modal = PurchaseQuantityModal(product, min(product['stock'], 999))
+            modal = PurchaseQuantityModal(product, min(product['stock'], 999), self.bot)  # Tambah self.bot
             await interaction.response.send_modal(modal)
 
         except ValueError as e:
@@ -699,7 +702,8 @@ class ShopView(View):
                 available_products,
                 self.balance_service,
                 self.product_service,
-                self.trx_manager
+                self.trx_manager,
+                self.bot
             ))
 
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
