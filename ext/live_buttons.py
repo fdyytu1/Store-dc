@@ -174,34 +174,32 @@ class ProductSelect(Select):
         await interaction.response.defer(ephemeral=True)
         try:
             selected_code = self.values[0]
+            
+            # Get product details
             product_response = await self.product_service.get_product(selected_code)
             if not product_response.success:
                 raise ValueError(product_response.error)
-
+            
             selected_product = product_response.data
-
-            # Verifikasi stock realtime
+    
+            # Verify stock
             stock_response = await self.product_service.get_stock_count(selected_code)
             if not stock_response.success:
                 raise ValueError(stock_response.error)
-
+    
             current_stock = stock_response.data
             if current_stock <= 0:
                 raise ValueError(MESSAGES.ERROR['OUT_OF_STOCK'])
-
-            # Verifikasi user balance
+    
+            # Verify user registration
             growid_response = await self.balance_service.get_growid(str(interaction.user.id))
             if not growid_response.success:
                 raise ValueError(growid_response.error)
-
-            growid = growid_response.data
-            if not growid:
-                raise ValueError(MESSAGES.ERROR['NOT_REGISTERED'])
-
-            await interaction.followup.send_modal(
-                QuantityModal(selected_code, min(current_stock, 999))
-            )
-
+    
+            # Show quantity modal untuk input jumlah pembelian
+            modal = QuantityModal(selected_code, min(current_stock, 999))
+            await interaction.followup.send_modal(modal)
+    
         except Exception as e:
             error_msg = str(e) if isinstance(e, ValueError) else MESSAGES.ERROR['TRANSACTION_FAILED']
             await interaction.followup.send(
@@ -270,6 +268,99 @@ class RegisterModal(Modal):
             error_embed = discord.Embed(
                 title="❌ Error",
                 description=MESSAGES.ERROR['REGISTRATION_FAILED'],
+                color=COLORS.ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+class QuantityModal(Modal):
+    def __init__(self, product_code: str, max_quantity: int):
+        super().__init__(title="🛍️ Jumlah Pembelian")
+        self.product_code = product_code
+
+        self.quantity = TextInput(
+            label="Masukkan jumlah yang ingin dibeli",
+            placeholder=f"Maksimal {max_quantity}",
+            min_length=1,
+            max_length=3,
+            required=True
+        )
+        self.add_item(self.quantity)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            quantity = int(self.quantity.value)
+            if quantity <= 0:
+                raise ValueError(MESSAGES.ERROR['INVALID_AMOUNT'])
+
+            product_service = ProductManagerService(interaction.client)
+            balance_service = BalanceManagerService(interaction.client)
+            trx_manager = TransactionManager(interaction.client)
+
+            # Get product details & verify stock
+            product_response = await product_service.get_product(self.product_code)
+            if not product_response.success:
+                raise ValueError(product_response.error)
+
+            product = product_response.data
+            stock_response = await product_service.get_stock_count(self.product_code)
+            if not stock_response.success:
+                raise ValueError(stock_response.error)
+
+            if stock_response.data < quantity:
+                raise ValueError(MESSAGES.ERROR['INSUFFICIENT_STOCK'])
+
+            # Calculate total price
+            total_price = float(product['price']) * quantity
+
+            # Get user's GrowID
+            growid_response = await balance_service.get_growid(str(interaction.user.id))
+            if not growid_response.success:
+                raise ValueError(growid_response.error)
+
+            growid = growid_response.data
+
+            # Process purchase
+            purchase_response = await trx_manager.process_purchase(
+                buyer_id=str(interaction.user.id),
+                product_code=self.product_code,
+                quantity=quantity
+            )
+
+            if not purchase_response.success:
+                raise ValueError(purchase_response.error)
+
+            # Create success embed
+            embed = discord.Embed(
+                title="✅ Pembelian Berhasil",
+                color=COLORS.SUCCESS
+            )
+
+            embed.add_field(
+                name="Detail Pembelian",
+                value=(
+                    f"```yml\n"
+                    f"Produk   : {product['name']}\n"
+                    f"Jumlah   : {quantity}x\n"
+                    f"Harga    : {total_price} WL\n"
+                    f"GrowID   : {growid}\n"
+                    "```"
+                ),
+                inline=False
+            )
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+
+        except ValueError as e:
+            error_embed = discord.Embed(
+                title="❌ Error", 
+                description=str(e),
+                color=COLORS.ERROR
+            )
+            await interaction.followup.send(embed=error_embed, ephemeral=True)
+        except Exception as e:
+            error_embed = discord.Embed(
+                title="❌ Error",
+                description=MESSAGES.ERROR['TRANSACTION_FAILED'],
                 color=COLORS.ERROR
             )
             await interaction.followup.send(embed=error_embed, ephemeral=True)
