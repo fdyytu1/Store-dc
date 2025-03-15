@@ -152,15 +152,26 @@ class LiveStockManager(BaseLockHandler):
                     category_header = f"\n__**{category}**__\n"
                     category_items = []
 
+
                     for product in category_products:
                         try:
+                            # Validasi product dan code
+                            if not product:
+                                continue
+                                
+                            product_code = product.get('code')
+                            if not product_code:
+                                self.logger.error("Product code not found")
+                                continue
+                    
                             # Get stock count dengan caching
-                            stock_cache_key = f'stock_count_{product["code"]}'
+                            stock_cache_key = f'stock_count_{product_code}'
                             stock_count = await self.cache_manager.get(stock_cache_key)
-
+                    
                             if stock_count is None:
-                                stock_response = await self.product_service.get_stock_count(product['code'])
+                                stock_response = await self.product_service.get_stock_count(product_code)
                                 if not stock_response.success:
+                                    self.logger.error(f"Failed to get stock count for {product_code}: {stock_response.error}")
                                     continue
                                 stock_count = stock_response.data
                                 await self.cache_manager.set(
@@ -168,36 +179,45 @@ class LiveStockManager(BaseLockHandler):
                                     stock_count,
                                     expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.SHORT)
                                 )
-
-                            # Status indicators dengan warna
-                            if stock_count > Stock.ALERT_THRESHOLD:
-                                status_color = "32"  # Green
-                                status_emoji = "🟢"
-                            elif stock_count > 0:
-                                status_color = "33"  # Yellow
-                                status_emoji = "🟡"
-                            else:
-                                status_color = "31"  # Red
-                                status_emoji = "🔴"
-
-                            # Format price menggunakan currency rates
-                            price = float(product['price'])
-                            price_display = self._format_price(price)
-
-                            # Product display dengan ANSI formatting
-                            product_info = (
-                                f"```ansi\n"
-                                f"{status_emoji} \u001b[0;{status_color}m{product['name']}\u001b[0m\n"
-                                f"└─ Price : {price_display}\n"
-                                f"└─ Stock : {stock_count} unit\n"
-                            )
-
-                            if product.get('description'):
-                                product_info += f"└─ Info  : {product['description']}\n"
-
-                            product_info += "```"
-                            category_items.append(product_info)
-
+                    
+                            # Status indicators dengan validasi
+                            try:
+                                product_name = product.get('name', 'Unknown Product')
+                                product_price = float(product.get('price', 0))
+                                product_desc = product.get('description', '')
+                                
+                                # Status indicators dengan warna
+                                if stock_count > Stock.ALERT_THRESHOLD:
+                                    status_color = "32"  # Green
+                                    status_emoji = "🟢"
+                                elif stock_count > 0:
+                                    status_color = "33"  # Yellow
+                                    status_emoji = "🟡"
+                                else:
+                                    status_color = "31"  # Red
+                                    status_emoji = "🔴"
+                    
+                                # Format price menggunakan currency rates
+                                price_display = self._format_price(product_price)
+                    
+                                # Product display dengan ANSI formatting dan error handling
+                                product_info = (
+                                    f"```ansi\n"
+                                    f"{status_emoji} \u001b[0;{status_color}m{product_name}\u001b[0m\n"
+                                    f"└─ Price : {price_display}\n"
+                                    f"└─ Stock : {stock_count} unit\n"
+                                )
+                    
+                                if product_desc:
+                                    product_info += f"└─ Info  : {product_desc}\n"
+                    
+                                product_info += "```"
+                                category_items.append(product_info)
+                    
+                            except Exception as e:
+                                self.logger.error(f"Error formatting product {product_code}: {e}")
+                                continue
+                    
                         except Exception as e:
                             self.logger.error(f"Error processing product {product.get('name', 'Unknown')}: {e}")
                             continue
