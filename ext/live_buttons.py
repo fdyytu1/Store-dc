@@ -2,7 +2,7 @@
 Live Buttons Manager with Shop Integration
 Author: fdyytu1
 Created at: 2025-03-07 22:35:08 UTC
-Last Modified: 2025-03-14 17:36:12 UTC
+Last Modified: 2025-03-14 18:30:07 UTC
 
 Dependencies:
 - ext.product_manager: For product operations
@@ -28,7 +28,7 @@ from .constants import (
     CACHE_TIMEOUT,
     Stock,
     Status,
-    CURRENCY_RATES,
+    CURRENCY_RATES,  
     UPDATE_INTERVAL,
     COG_LOADED,
     TransactionType,
@@ -43,10 +43,11 @@ from .trx import TransactionManager
 from .admin_service import AdminService
 
 class PurchaseQuantityModal(Modal):
-    def __init__(self, product: Dict, max_quantity: int):
+    def __init__(self, product: Dict, max_quantity: int, bot):
         super().__init__(title=f"🛒 Beli {product['name']}")
         self.product = product
         self.max_quantity = max_quantity
+        self.bot = bot
 
         self.quantity = TextInput(
             label="Jumlah yang ingin dibeli",
@@ -56,7 +57,6 @@ class PurchaseQuantityModal(Modal):
             required=True
         )
         self.add_item(self.quantity)
-        self.bot = bot
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -85,7 +85,7 @@ class PurchaseQuantityModal(Modal):
                 inline=False
             )
 
-            view = PurchaseConfirmationView(self.product, quantity, total_price, self.bot)  # Tambah self.bot
+            view = PurchaseConfirmationView(self.product, quantity, total_price, self.bot)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
         except ValueError as e:
@@ -99,14 +99,14 @@ class PurchaseQuantityModal(Modal):
             )
 
 class PurchaseConfirmationView(View):
-    def __init__(self, product: Dict, quantity: int, total_price: float):
+    def __init__(self, product: Dict, quantity: int, total_price: float, bot):
         super().__init__(timeout=300)  # 5 menit timeout
         self.product = product
         self.quantity = quantity
         self.total_price = total_price
-        self.bot = bot  # Tambah ini
-        self.balance_service = BalanceManagerService()
-        self.trx_manager = TransactionManager()
+        self.bot = bot
+        self.balance_service = BalanceManagerService(bot)
+        self.trx_manager = TransactionManager(bot)
 
     @discord.ui.button(
         label="✅ Konfirmasi Pembelian", 
@@ -137,7 +137,7 @@ class PurchaseConfirmationView(View):
 
             # Process purchase
             purchase_response = await self.trx_manager.process_purchase(
-                growid=growid,
+                user_id=growid,  # Ubah growid menjadi user_id
                 product_code=self.product['code'],
                 quantity=self.quantity,
                 price=self.total_price
@@ -185,27 +185,53 @@ class PurchaseConfirmationView(View):
         style=discord.ButtonStyle.danger
     )
     async def cancel(self, interaction: discord.Interaction, button: Button):
-        for child in self.children:
-            child.disabled = True
-        await interaction.message.edit(view=self)
-        
-        await interaction.response.send_message(
-            embed=discord.Embed(
-                title="❌ Dibatalkan",
-                description="Pembelian dibatalkan",
-                color=COLORS.ERROR
-            ),
-            ephemeral=True
-        )
+        try:
+            await interaction.response.defer(ephemeral=True)
+            
+            # Disable semua tombol
+            for child in self.children:
+                child.disabled = True
+            
+            # Update view dengan safe handling
+            try:
+                await interaction.message.edit(view=self)
+            except discord.NotFound:
+                pass  # Abaikan jika pesan sudah tidak ada
+            except Exception as e:
+                self.logger.error(f"Error updating view: {e}")
+            
+            # Kirim pesan pembatalan
+            await interaction.followup.send(
+                embed=discord.Embed(
+                    title="❌ Dibatalkan",
+                    description="Pembelian dibatalkan",
+                    color=COLORS.ERROR
+                ),
+                ephemeral=True
+            )
+        except Exception as e:
+            self.logger.error(f"Error in cancel callback: {e}")
+            try:
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="❌ Error",
+                        description="Terjadi kesalahan saat membatalkan pembelian",
+                        color=COLORS.ERROR
+                    ),
+                    ephemeral=True
+                )
+            except:
+                pass
+
 
 class ProductSelect(Select):
-    def __init__(self, products: List[Dict], balance_service, product_service, trx_manager):
+    def __init__(self, products: List[Dict], balance_service, product_service, trx_manager, bot):
         self.products_cache = {p['code']: p for p in products}
         self.balance_service = balance_service
         self.product_service = product_service
         self.trx_manager = trx_manager
-        self.bot = bot  # Tambah Ini
-        
+        self.bot = bot
+
         options = [
             discord.SelectOption(
                 label=f"{product['name']}",
@@ -233,7 +259,7 @@ class ProductSelect(Select):
                 raise ValueError(MESSAGES.ERROR['OUT_OF_STOCK'])
 
             # Show quantity input modal
-            modal = PurchaseQuantityModal(product, min(product['stock'], 999), self.bot)  # Tambah self.bot
+            modal = PurchaseQuantityModal(product, min(product['stock'], 999), self.bot)
             await interaction.response.send_modal(modal)
 
         except ValueError as e:
@@ -425,7 +451,6 @@ class ShopView(View):
 
         try:
             await interaction.response.defer(ephemeral=True)
-
             # Check maintenance mode
             if await self.admin_service.is_maintenance_mode():
                 raise ValueError(MESSAGES.INFO['MAINTENANCE'])
@@ -703,7 +728,7 @@ class ShopView(View):
                 self.balance_service,
                 self.product_service,
                 self.trx_manager,
-                self.bot
+                self.bot  # Tambahkan self.bot
             ))
 
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
