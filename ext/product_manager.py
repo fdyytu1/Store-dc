@@ -1,15 +1,16 @@
 """
 Product Manager Service
-Author: fdyytu
+Author: fdyytu1
 Created at: 2025-03-07 18:04:56 UTC
-Last Modified: 2025-03-14 06:40:42 UTC
+Last Modified: 2025-03-15 12:07:52 UTC
 """
 
 import logging
 import asyncio
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 import hashlib
+
 import discord
 from discord.ext import commands
 
@@ -19,12 +20,138 @@ from .constants import (
     CACHE_TIMEOUT,
     MESSAGES,
     Stock,
-    NOTIFICATION_CHANNELS,
-    COLORS
+    COLORS,
+    NOTIFICATION_CHANNELS
 )
 from database import get_connection
 from .base_handler import BaseLockHandler
 from .cache_manager import CacheManager
+
+class ProductManagerResponse:
+    """Response handler untuk semua operasi product manager"""
+    def __init__(self, success: bool, data: Any = None, message: str = "", error: str = ""):
+        self.success = success
+        self.data = data 
+        self.message = message
+        self.error = error
+        self.timestamp = datetime.utcnow()
+        
+        # Fields untuk product
+        self.product_code = None
+        self.product_name = None
+        self.product_price = None
+        self.description = None
+        
+        # Fields untuk stock
+        self.stock_count = None
+        self.stock_items = None
+        self.stock_status = None
+        
+        # Fields untuk transaksi
+        self.buyer_id = None
+        self.quantity = None
+        self.total_price = None
+        self.transaction_type = None
+        
+        # Fields untuk world info
+        self.world = None
+        self.owner = None
+        self.bot_name = None
+        self.world_status = None
+
+    @classmethod
+    def success(cls, data: Any = None, message: str = "") -> 'ProductManagerResponse':
+        return cls(True, data, message)
+
+    @classmethod
+    def error(cls, error: str, message: str = "") -> 'ProductManagerResponse':
+        return cls(False, None, message, error)
+
+    def set_product_info(self, code: str, name: str, price: int, description: str = None):
+        """Set informasi produk"""
+        self.product_code = code
+        self.product_name = name
+        self.product_price = price
+        self.description = description
+        return self
+
+    def set_stock_info(self, count: int, items: List = None, status: str = None):
+        """Set informasi stok"""
+        self.stock_count = count
+        self.stock_items = items
+        self.stock_status = status
+        return self
+
+    def set_transaction_info(self, buyer_id: str, quantity: int, total_price: int, type: str):
+        """Set informasi transaksi"""
+        self.buyer_id = buyer_id
+        self.quantity = quantity
+        self.total_price = total_price
+        self.transaction_type = type
+        return self
+
+    def set_world_info(self, world: str, owner: str, bot_name: str, status: str):
+        """Set informasi world"""
+        self.world = world
+        self.owner = owner
+        self.bot_name = bot_name
+        self.world_status = status
+        return self
+
+    def to_dict(self) -> Dict:
+        """Convert response ke dictionary"""
+        result = {
+            'success': self.success,
+            'data': self.data,
+            'message': self.message,
+            'error': self.error,
+            'timestamp': self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        }
+        
+        # Add product info if exists
+        if self.product_code:
+            result.update({
+                'product': {
+                    'code': self.product_code,
+                    'name': self.product_name,
+                    'price': self.product_price,
+                    'description': self.description
+                }
+            })
+            
+        # Add stock info if exists
+        if self.stock_count is not None:
+            result.update({
+                'stock': {
+                    'count': self.stock_count,
+                    'items': self.stock_items,
+                    'status': self.stock_status
+                }
+            })
+            
+        # Add transaction info if exists
+        if self.buyer_id:
+            result.update({
+                'transaction': {
+                    'buyer_id': self.buyer_id,
+                    'quantity': self.quantity,
+                    'total_price': self.total_price,
+                    'type': self.transaction_type
+                }
+            })
+            
+        # Add world info if exists
+        if self.world:
+            result.update({
+                'world': {
+                    'name': self.world,
+                    'owner': self.owner,
+                    'bot': self.bot_name,
+                    'status': self.world_status
+                }
+            })
+            
+        return result
 
 class ProductCallbackManager:
     """Manager untuk mengelola callbacks product service"""
@@ -39,43 +166,19 @@ class ProductCallbackManager:
             'error': []
         }
     
-    def register(self, event_type: str, callback: Callable):
+    def register(self, event_type: str, callback: Any):
+        """Register callback untuk event tertentu"""
         if event_type in self.callbacks:
             self.callbacks[event_type].append(callback)
     
     async def trigger(self, event_type: str, *args: Any, **kwargs: Any):
+        """Trigger semua callback untuk event tertentu"""
         if event_type in self.callbacks:
             for callback in self.callbacks[event_type]:
                 try:
                     await callback(*args, **kwargs)
                 except Exception as e:
                     logging.error(f"Error in {event_type} callback: {e}")
-
-class ProductResponse:
-    """Class untuk standarisasi response dari product service"""
-    def __init__(self, success: bool, data: Any = None, message: str = "", error: str = ""):
-        self.success = success
-        self.data = data
-        self.message = message
-        self.error = error
-        self.timestamp = datetime.utcnow()
-    
-    def to_dict(self) -> Dict:
-        return {
-            'success': self.success,
-            'data': self.data,
-            'message': self.message,
-            'error': self.error,
-            'timestamp': self.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-        }
-    
-    @classmethod
-    def success(cls, data: Any = None, message: str = "") -> 'ProductResponse':
-        return cls(True, data, message)
-    
-    @classmethod
-    def error(cls, error: str, message: str = "") -> 'ProductResponse':
-        return cls(False, None, message, error)
 
 class ProductManagerService(BaseLockHandler):
     _instance = None
@@ -96,7 +199,7 @@ class ProductManagerService(BaseLockHandler):
             self.callback_manager = ProductCallbackManager()
             self.setup_default_callbacks()
             self.initialized = True
-    
+
     def setup_default_callbacks(self):
         """Setup default callbacks untuk notifikasi"""
         
@@ -141,38 +244,123 @@ class ProductManagerService(BaseLockHandler):
                 embed.add_field(name="Total Price", value=f"{product['price'] * quantity:,} WL")
                 await channel.send(embed=embed)
         
-        async def notify_error(operation: str, error: str):
-            """Callback untuk notifikasi error"""
-            channel_id = NOTIFICATION_CHANNELS.get('error_logs')
-            if channel := self.bot.get_channel(channel_id):
-                embed = discord.Embed(
-                    title="Error Occurred",
-                    description=f"Operation: {operation}",
-                    color=COLORS.ERROR
-                )
-                embed.add_field(name="Error", value=error)
-                await channel.send(embed=embed)
-        
         # Register default callbacks
         self.callback_manager.register('product_created', notify_product_created)
         self.callback_manager.register('stock_added', notify_stock_added)
         self.callback_manager.register('stock_sold', notify_stock_sold)
-        self.callback_manager.register('error', notify_error)
 
-    async def create_product(self, code: str, name: str, price: int, description: str = None) -> ProductResponse:
-        """Create a new product with proper locking and cache invalidation"""
+    async def get_product(self, code: str) -> ProductManagerResponse:
+        """Get product dengan info lengkap"""
+        cache_key = f"product_{code}"
+        cached = await self.cache_manager.get(cache_key)
+        if cached:
+            response = ProductManagerResponse.success(cached)
+            response.set_product_info(
+                code=cached['code'],
+                name=cached['name'],
+                price=cached['price'],
+                description=cached.get('description')
+            )
+            return response
+
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                "SELECT * FROM products WHERE code = ? COLLATE NOCASE",
+                (code,)
+            )
+            
+            result = cursor.fetchone()
+            if not result:
+                return ProductManagerResponse.error(MESSAGES.ERROR['PRODUCT_NOT_FOUND'])
+
+            product = dict(result)
+            
+            # Get stock count
+            stock_count = await self._get_stock_count_internal(code)
+            
+            response = ProductManagerResponse.success(product)
+            response.set_product_info(
+                code=product['code'],
+                name=product['name'],
+                price=product['price'],
+                description=product.get('description')
+            )
+            response.set_stock_info(count=stock_count)
+            
+            await self.cache_manager.set(
+                cache_key,
+                product,
+                expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.MEDIUM)
+            )
+            
+            return response
+
+        except Exception as e:
+            self.logger.error(f"Error getting product: {e}")
+            return ProductManagerResponse.error(str(e))
+        finally:
+            if conn:
+                conn.close()
+
+    async def get_all_products(self) -> ProductManagerResponse:
+        """Get all products dengan stock count"""
+        cached = await self.cache_manager.get("all_products")
+        if cached:
+            return ProductManagerResponse.success(cached)
+
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT * FROM products ORDER BY code")
+            
+            products = []
+            for row in cursor.fetchall():
+                product = dict(row)
+                stock_count = await self._get_stock_count_internal(product['code'])
+                
+                response = ProductManagerResponse.success(product)
+                response.set_product_info(
+                    code=product['code'],
+                    name=product['name'],
+                    price=product['price'],
+                    description=product.get('description')
+                )
+                response.set_stock_info(count=stock_count)
+                products.append(response.to_dict())
+            
+            await self.cache_manager.set(
+                "all_products",
+                products,
+                expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.SHORT)
+            )
+            
+            return ProductManagerResponse.success(products)
+
+        except Exception as e:
+            self.logger.error(f"Error getting all products: {e}")
+            return ProductManagerResponse.error(str(e))
+        finally:
+            if conn:
+                conn.close()
+
+    async def create_product(self, code: str, name: str, price: int, description: str = None) -> ProductManagerResponse:
+        """Create product baru"""
         if price < Stock.MIN_PRICE:
-            return ProductResponse.error(MESSAGES.ERROR['INVALID_AMOUNT'])
+            return ProductManagerResponse.error(MESSAGES.ERROR['INVALID_AMOUNT'])
 
         lock = await self.acquire_lock(f"product_create_{code}")
         if not lock:
-            return ProductResponse.error(MESSAGES.ERROR['TRANSACTION_FAILED'])
+            return ProductManagerResponse.error(MESSAGES.ERROR['LOCK_ACQUISITION_FAILED'])
 
-        conn = None
         try:
+            # Check if product exists
             existing = await self.get_product(code)
-            if existing:
-                return ProductResponse.error(f"Product with code '{code}' already exists")
+            if existing.success:
+                return ProductManagerResponse.error(f"Product with code '{code}' already exists")
 
             conn = get_connection()
             cursor = conn.cursor()
@@ -187,211 +375,158 @@ class ProductManagerService(BaseLockHandler):
             
             conn.commit()
             
-            result = {
+            product = {
                 'code': code,
                 'name': name,
                 'price': price,
                 'description': description
             }
             
+            response = ProductManagerResponse.success(product, "Product created successfully")
+            response.set_product_info(code, name, price, description)
+            response.set_stock_info(count=0)
+            
             # Update cache
             await self.cache_manager.set(
-                f"product_{code}", 
-                result,
+                f"product_{code}",
+                product,
                 expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.MEDIUM)
             )
             await self.cache_manager.delete("all_products")
             
             # Trigger callback
-            await self.callback_manager.trigger('product_created', result)
+            await self.callback_manager.trigger('product_created', product)
             
-            return ProductResponse.success(result, "Product created successfully")
+            return response
 
         except Exception as e:
             self.logger.error(f"Error creating product: {e}")
             if conn:
                 conn.rollback()
-            await self.callback_manager.trigger('error', 'create_product', str(e))
-            return ProductResponse.error(str(e))
+            return ProductManagerResponse.error(str(e))
         finally:
             if conn:
                 conn.close()
             self.release_lock(f"product_create_{code}")
 
-    async def get_product(self, code: str) -> Optional[Dict]:
-        """Get product with caching"""
-        cache_key = f"product_{code}"
-        cached = await self.cache_manager.get(cache_key)
-        if cached:
-            return cached
-
-        lock = await self.acquire_lock(f"product_get_{code}")
-        if not lock:
-            self.logger.warning(f"Failed to acquire lock for getting product {code}")
-            return None
-
+    async def add_stock(self, product_code: str, content: str, added_by: str) -> ProductManagerResponse:
+        """Add stock item dengan validasi lengkap"""
         try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute(
-                "SELECT * FROM products WHERE code = ? COLLATE NOCASE",
-                (code,)
-            )
-            
-            result = cursor.fetchone()
-            if result:
-                product = dict(result)
-                await self.cache_manager.set(
-                    cache_key, 
-                    product,
-                    expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.MEDIUM)
-                )
-                return product
-            return None
-
-        except Exception as e:
-            self.logger.error(f"Error getting product: {e}")
-            await self.callback_manager.trigger('error', 'get_product', str(e))
-            return None
-        finally:
-            if conn:
-                conn.close()
-            self.release_lock(f"product_get_{code}")
-
-    async def get_all_products(self) -> ProductResponse:
-        """Get all products with caching"""
-        cached = await self.cache_manager.get("all_products")
-        if cached:
-            return ProductResponse.success(cached)
-
-        lock = await self.acquire_lock("products_getall")
-        if not lock:
-            return ProductResponse.error(MESSAGES.ERROR['TRANSACTION_FAILED'])
-
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            
-            cursor.execute("SELECT * FROM products ORDER BY code")
-            
-            products = [dict(row) for row in cursor.fetchall()]
-            await self.cache_manager.set(
-                "all_products", 
-                products,
-                expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.SHORT)
-            )
-            return ProductResponse.success(products)
-
-        except Exception as e:
-            self.logger.error(f"Error getting all products: {e}")
-            await self.callback_manager.trigger('error', 'get_all_products', str(e))
-            return ProductResponse.error(str(e))
-        finally:
-            if conn:
-                conn.close()
-            self.release_lock("products_getall")
-
-    async def add_stock_item(self, product_code: str, content: str, added_by: str) -> ProductResponse:
-        """Add stock item dengan validasi dan enhanced duplicate checking"""
-        try:
-            # Validasi content: pastikan tidak kosong dan hanya 1 baris
+            # Validasi content
             content = content.strip()
             if not content:
-                return ProductResponse.error("Content cannot be empty")
+                return ProductManagerResponse.error("Content cannot be empty")
             if '\n' in content:
-                return ProductResponse.error("Content must be single line")
+                return ProductManagerResponse.error("Content must be single line")
 
-            # Buat unique lock key berdasarkan content
+            # Validasi product
+            product_response = await self.get_product(product_code)
+            if not product_response.success:
+                return product_response
+
+            # Get current stock count
+            stock_count = await self._get_stock_count_internal(product_code)
+            if stock_count >= Stock.MAX_STOCK:
+                return ProductManagerResponse.error(f"Stock limit reached ({Stock.MAX_STOCK})")
+
+            # Create unique lock key
             content_hash = hashlib.md5(content.encode()).hexdigest()
             lock_key = f"stock_add_{product_code}_{content_hash}"
             
-            max_retries = 3
-            retry_delay = 1.0
-            
-            for attempt in range(max_retries):
-                lock = await self.acquire_lock(lock_key, timeout=10.0)
-                if lock:
-                    conn = None
-                    try:
-                        conn = get_connection()
-                        cursor = conn.cursor()
-                        
-                        # Check duplicates
-                        cursor.execute("""
-                            SELECT id FROM stock 
-                            WHERE product_code = ? AND content = ? 
-                            AND status != ?
-                        """, (product_code, content, Status.DELETED.value))
-                        
-                        if cursor.fetchone():
-                            return ProductResponse.error("Duplicate stock content detected")
-                            
-                        # Verify product exists
-                        cursor.execute(
-                            "SELECT code FROM products WHERE code = ? COLLATE NOCASE",
-                            (product_code,)
-                        )
-                        if not cursor.fetchone():
-                            return ProductResponse.error(MESSAGES.ERROR['PRODUCT_NOT_FOUND'])
-                        
-                        # Check stock limit
-                        current_stock_response = await self.get_stock_count(product_code)
-                        if current_stock_response.success:
-                            if current_stock_response.data >= Stock.MAX_STOCK:
-                                return ProductResponse.error(f"Stock limit reached ({Stock.MAX_STOCK})")
-                        
-                        cursor.execute(
-                            """
-                            INSERT INTO stock (product_code, content, added_by, status)
-                            VALUES (?, ?, ?, ?)
-                            """,
-                            (product_code, content, added_by, Status.AVAILABLE.value)
-                        )
-                        
-                        conn.commit()
-                        
-                        # Invalidate caches
-                        await self.cache_manager.delete(f"stock_count_{product_code}")
-                        await self.cache_manager.delete(f"stock_{product_code}")
-                        
-                        # Trigger callback
-                        await self.callback_manager.trigger('stock_added', product_code, 1, added_by)
-                        
-                        return ProductResponse.success(None, "Stock added successfully")
+            lock = await self.acquire_lock(lock_key)
+            if not lock:
+                return ProductManagerResponse.error(MESSAGES.ERROR['LOCK_ACQUISITION_FAILED'])
 
-                    except Exception as e:
-                        self.logger.error(f"Error adding stock item: {e}")
-                        if conn:
-                            conn.rollback()
-                        return ProductResponse.error(str(e))
-                    finally:
-                        if conn:
-                            conn.close()
-                        self.release_lock(lock_key)
-                else:
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delay)
-                        continue
-                    return ProductResponse.error("Failed to acquire lock for adding stock")
+            try:
+                conn = get_connection()
+                cursor = conn.cursor()
+                
+                # Check duplicates
+                cursor.execute(
+                    """
+                    SELECT id FROM stock 
+                    WHERE product_code = ? AND content = ? 
+                    AND status != ?
+                    """,
+                    (product_code, content, Status.DELETED.value)
+                )
+                
+                if cursor.fetchone():
+                    return ProductManagerResponse.error("Duplicate stock content detected")
+                
+                cursor.execute(
+                    """
+                    INSERT INTO stock (product_code, content, added_by, status)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (product_code, content, added_by, Status.AVAILABLE.value)
+                )
+                
+                conn.commit()
+                
+                # Update caches
+                await self.cache_manager.delete(f"stock_count_{product_code}")
+                for i in range(1, Stock.MAX_ITEMS + 1):
+                    await self.cache_manager.delete(f"stock_{product_code}_q{i}")
+                
+                # Get updated stock count
+                new_count = await self._get_stock_count_internal(product_code)
+                
+                response = ProductManagerResponse.success(None, "Stock added successfully")
+                response.set_product_info(
+                    code=product_code,
+                    name=product_response.product_name,
+                    price=product_response.product_price,
+                    description=product_response.description
+                )
+                response.set_stock_info(
+                    count=new_count,
+                    items=[content],
+                    status=Status.AVAILABLE.value
+                )
+                
+                # Trigger callback
+                await self.callback_manager.trigger(
+                    'stock_added', 
+                    product_code, 
+                    1, 
+                    added_by
+                )
+                
+                return response
+
+            except Exception as e:
+                if conn:
+                    conn.rollback()
+                raise e
+            finally:
+                if conn:
+                    conn.close()
+                self.release_lock(lock_key)
 
         except Exception as e:
-            self.logger.error(f"Unexpected error in add_stock_item: {e}")
-            return ProductResponse.error(f"Unexpected error: {str(e)}")
+            self.logger.error(f"Error adding stock: {e}")
+            return ProductManagerResponse.error(str(e))
 
-    async def get_available_stock(self, product_code: str, quantity: int = 1) -> ProductResponse:
-        """Get available stock with proper locking"""
+    async def get_available_stock(self, product_code: str, quantity: int = 1) -> ProductManagerResponse:
+        """Get available stock dengan proper locking"""
         if quantity < 1:
-            return ProductResponse.error(MESSAGES.ERROR['INVALID_AMOUNT'])
+            return ProductManagerResponse.error(MESSAGES.ERROR['INVALID_AMOUNT'])
             
         cache_key = f"stock_{product_code}_q{quantity}"
         cached = await self.cache_manager.get(cache_key)
         if cached:
-            return ProductResponse.success(cached)
+            response = ProductManagerResponse.success(cached)
+            response.set_stock_info(
+                count=len(cached),
+                items=cached,
+                status=Status.AVAILABLE.value
+            )
+            return response
 
         lock = await self.acquire_lock(f"stock_get_{product_code}")
         if not lock:
-            return ProductResponse.error(MESSAGES.ERROR['TRANSACTION_FAILED'])
+            return ProductManagerResponse.error(MESSAGES.ERROR['LOCK_ACQUISITION_FAILED'])
 
         try:
             conn = get_connection()
@@ -405,7 +540,7 @@ class ProductManagerService(BaseLockHandler):
                 LIMIT ?
             """, (product_code, Status.AVAILABLE.value, quantity))
             
-            result = [{
+            stock_items = [{
                 'id': row['id'],
                 'content': row['content'],
                 'added_at': row['added_at']
@@ -413,86 +548,60 @@ class ProductManagerService(BaseLockHandler):
 
             await self.cache_manager.set(
                 cache_key, 
-                result,
+                stock_items,
                 expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.SHORT)
             )
-            return ProductResponse.success(result)
+
+            response = ProductManagerResponse.success(stock_items)
+            response.set_stock_info(
+                count=len(stock_items),
+                items=stock_items,
+                status=Status.AVAILABLE.value
+            )
+            return response
 
         except Exception as e:
             self.logger.error(f"Error getting available stock: {e}")
-            await self.callback_manager.trigger('error', 'get_available_stock', str(e))
-            return ProductResponse.error(str(e))
+            return ProductManagerResponse.error(str(e))
         finally:
             if conn:
                 conn.close()
             self.release_lock(f"stock_get_{product_code}")
 
-    async def get_stock_count(self, product_code: str) -> ProductResponse:
-        """Get stock count with caching"""
-        cache_key = f"stock_count_{product_code}"
-        cached = await self.cache_manager.get(cache_key)
-        if cached is not None:
-            return ProductResponse.success(cached)
-
-        lock = await self.acquire_lock(f"stock_count_{product_code}")
-        if not lock:
-            return ProductResponse.error(MESSAGES.ERROR['TRANSACTION_FAILED'])
-
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT COUNT(*) as count 
-                FROM stock 
-                WHERE product_code = ? AND status = ?
-            """, (product_code, Status.AVAILABLE.value))
-            
-            result = cursor.fetchone()['count']
-            await self.cache_manager.set(
-                cache_key, 
-                result,
-                expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.SHORT)
-            )
-            return ProductResponse.success(result)
-
-        except Exception as e:
-            self.logger.error(f"Error getting stock count: {e}")
-            await self.callback_manager.trigger('error', 'get_stock_count', str(e))
-            return ProductResponse.error(str(e))
-        finally:
-            if conn:
-                conn.close()
-            self.release_lock(f"stock_count_{product_code}")
-
     async def update_stock_status(
-        self, 
-        stock_id: int, 
-        status: str, 
+        self,
+        stock_id: int,
+        status: str,
         buyer_id: str = None
-    ) -> ProductResponse:
-        """Update stock status with proper locking"""
+    ) -> ProductManagerResponse:
+        """Update stock status dengan proper locking"""
         if status not in [s.value for s in Status]:
-            return ProductResponse.error(f"Invalid status: {status}")
+            return ProductManagerResponse.error(f"Invalid status: {status}")
             
         lock = await self.acquire_lock(f"stock_update_{stock_id}")
         if not lock:
-            return ProductResponse.error(MESSAGES.ERROR['TRANSACTION_FAILED'])
+            return ProductManagerResponse.error(MESSAGES.ERROR['LOCK_ACQUISITION_FAILED'])
 
-        conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
             # Get product code first for cache invalidation
             cursor.execute(
-                "SELECT product_code FROM stock WHERE id = ?", 
+                "SELECT product_code, content FROM stock WHERE id = ?", 
                 (stock_id,)
             )
-            product_result = cursor.fetchone()
-            if not product_result:
-                return ProductResponse.error(MESSAGES.ERROR['STOCK_NOT_FOUND'])
+            stock_info = cursor.fetchone()
+            if not stock_info:
+                return ProductManagerResponse.error(MESSAGES.ERROR['STOCK_NOT_FOUND'])
             
-            product_code = product_result['product_code']
+            product_code = stock_info['product_code']
+            stock_content = stock_info['content']
+            
+            # Get product info
+            product_response = await self.get_product(product_code)
+            if not product_response.success:
+                return product_response
             
             update_query = """
                 UPDATE stock 
@@ -512,40 +621,85 @@ class ProductManagerService(BaseLockHandler):
             
             # Invalidate relevant caches
             await self.cache_manager.delete(f"stock_count_{product_code}")
-            await self.cache_manager.delete(f"stock_{product_code}")
             for i in range(1, Stock.MAX_ITEMS + 1):
                 await self.cache_manager.delete(f"stock_{product_code}_q{i}")
             
-            # Get product info for callback
-            product = await self.get_product(product_code)
+            # Get updated stock count
+            new_count = await self._get_stock_count_internal(product_code)
+            
+            response = ProductManagerResponse.success(None, "Stock status updated successfully")
+            response.set_product_info(
+                code=product_code,
+                name=product_response.product_name,
+                price=product_response.product_price
+            )
+            response.set_stock_info(
+                count=new_count,
+                items=[{'id': stock_id, 'content': stock_content}],
+                status=status
+            )
+            if buyer_id:
+                response.set_transaction_info(
+                    buyer_id=buyer_id,
+                    quantity=1,
+                    total_price=product_response.product_price,
+                    type='purchase'
+                )
             
             # Trigger callbacks
             await self.callback_manager.trigger('stock_updated', stock_id, status)
             if status == Status.SOLD.value and buyer_id:
-                await self.callback_manager.trigger('stock_sold', product, buyer_id, 1)
+                await self.callback_manager.trigger(
+                    'stock_sold',
+                    product_response.data,
+                    buyer_id,
+                    1
+                )
             
-            return ProductResponse.success(None, "Stock status updated successfully")
+            return response
 
         except Exception as e:
             self.logger.error(f"Error updating stock status: {e}")
             if conn:
                 conn.rollback()
-            await self.callback_manager.trigger('error', 'update_stock_status', str(e))
-            return ProductResponse.error(str(e))
+            return ProductManagerResponse.error(str(e))
         finally:
             if conn:
                 conn.close()
             self.release_lock(f"stock_update_{stock_id}")
 
-    async def get_world_info(self) -> ProductResponse:
-        """Get world info with caching"""
+    async def _get_stock_count_internal(self, product_code: str) -> int:
+        """Internal method untuk get stock count"""
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) as count 
+                FROM stock 
+                WHERE product_code = ? AND status = ?
+            """, (product_code, Status.AVAILABLE.value))
+            
+            return cursor.fetchone()['count']
+        finally:
+            if conn:
+                conn.close()
+
+    async def get_world_info(self) -> ProductManagerResponse:
+        """Get world info dengan caching"""
         cached = await self.cache_manager.get("world_info")
         if cached:
-            return ProductResponse.success(cached)
+            response = ProductManagerResponse.success(cached)
+            response.set_world_info(
+                world=cached['world'],
+                owner=cached['owner'],
+                bot_name=cached['bot'],
+                status=cached['status']
+            )
+            return response
 
         lock = await self.acquire_lock("world_info_get")
         if not lock:
-            return ProductResponse.error(MESSAGES.ERROR['TRANSACTION_FAILED'])
+            return ProductManagerResponse.error(MESSAGES.ERROR['LOCK_ACQUISITION_FAILED'])
 
         try:
             conn = get_connection()
@@ -561,34 +715,48 @@ class ProductManagerService(BaseLockHandler):
                     info,
                     expires_in=CACHE_TIMEOUT.get_seconds(CACHE_TIMEOUT.SHORT)
                 )
-                return ProductResponse.success(info)
-            return ProductResponse.error("World info not found")
+                
+                response = ProductManagerResponse.success(info)
+                response.set_world_info(
+                    world=info['world'],
+                    owner=info['owner'],
+                    bot_name=info['bot'],
+                    status=info['status']
+                )
+                return response
+                
+            return ProductManagerResponse.error(MESSAGES.ERROR['WORLD_INFO_NOT_FOUND'])
 
         except Exception as e:
             self.logger.error(f"Error getting world info: {e}")
-            await self.callback_manager.trigger('error', 'get_world_info', str(e))
-            return ProductResponse.error(str(e))
+            return ProductManagerResponse.error(str(e))
         finally:
             if conn:
                 conn.close()
             self.release_lock("world_info_get")
 
-    async def update_world_info(self, world: str, owner: str, bot: str) -> ProductResponse:
-        """Update world info with proper locking"""
+    async def update_world_info(
+        self,
+        world: str,
+        owner: str,
+        bot: str,
+        status: str = 'online'
+    ) -> ProductManagerResponse:
+        """Update world info dengan proper locking"""
         lock = await self.acquire_lock("world_info_update")
         if not lock:
-            return ProductResponse.error(MESSAGES.ERROR['TRANSACTION_FAILED'])
+            return ProductManagerResponse.error(MESSAGES.ERROR['LOCK_ACQUISITION_FAILED'])
 
-        conn = None
         try:
             conn = get_connection()
             cursor = conn.cursor()
             
             cursor.execute("""
                 UPDATE world_info 
-                SET world = ?, owner = ?, bot = ?, updated_at = CURRENT_TIMESTAMP
+                SET world = ?, owner = ?, bot = ?, status = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
-            """, (world, owner, bot))
+            """, (world, owner, bot, status))
             
             conn.commit()
             
@@ -598,20 +766,23 @@ class ProductManagerService(BaseLockHandler):
             result = {
                 'world': world,
                 'owner': owner,
-                'bot': bot
+                'bot': bot,
+                'status': status
             }
+            
+            response = ProductManagerResponse.success(result, "World info updated successfully")
+            response.set_world_info(world, owner, bot, status)
             
             # Trigger callback
             await self.callback_manager.trigger('world_updated', result)
             
-            return ProductResponse.success(result, "World info updated successfully")
+            return response
 
         except Exception as e:
             self.logger.error(f"Error updating world info: {e}")
             if conn:
                 conn.rollback()
-            await self.callback_manager.trigger('error', 'update_world_info', str(e))
-            return ProductResponse.error(str(e))
+            return ProductManagerResponse.error(str(e))
         finally:
             if conn:
                 conn.close()
@@ -630,25 +801,22 @@ class ProductManagerService(BaseLockHandler):
                 await self.cache_manager.delete_pattern(pattern)
             self.logger.info("ProductManagerService cleanup completed")
         except Exception as e:
-            self.logger.error(f"Error during ProductManagerService cleanup: {e}")
+            self.logger.error(f"Error during cleanup: {e}")
 
     async def verify_dependencies(self) -> bool:
         """Verify all required dependencies are available"""
         try:
-            # Verifikasi koneksi database
-            conn = None
-            try:
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1")  # Simple test query
-                cursor.fetchone()
-                return True
-            finally:
-                if conn:
-                    conn.close()
+            conn = get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            return True
         except Exception as e:
             self.logger.error(f"Failed to verify dependencies: {e}")
             return False
+        finally:
+            if conn:
+                conn.close()
 
 class ProductManagerCog(commands.Cog):
     def __init__(self, bot):
@@ -685,8 +853,7 @@ async def teardown(bot):
             cog = bot.get_cog('ProductManagerCog')
             if cog:
                 await bot.remove_cog('ProductManagerCog')
-                if hasattr(cog, 'product_manager'):
-                    await cog.product_manager.cleanup()
+                await cog.product_service.cleanup()
             delattr(bot, 'product_manager_loaded')
             logging.info("ProductManager extension unloaded successfully")
     except Exception as e:
