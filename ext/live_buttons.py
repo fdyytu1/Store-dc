@@ -167,131 +167,6 @@ class PurchaseQuantityModal(Modal):
                 ephemeral=True
             )
             
-class PurchaseConfirmationView(View):
-    def __init__(self, product: Dict, quantity: int, total_price: float, bot):
-        super().__init__(timeout=300)  # 5 menit timeout
-        self.product = product
-        self.quantity = quantity
-        self.total_price = total_price
-        self.bot = bot
-        self.balance_service = BalanceManagerService(bot)
-        self.trx_manager = TransactionManager(bot)
-
-    @discord.ui.button(
-        label="✅ Konfirmasi Pembelian", 
-        style=discord.ButtonStyle.success
-    )
-    async def confirm(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            # Get user's GrowID
-            growid_response = await self.balance_service.get_growid(str(interaction.user.id))
-            if not growid_response.success:
-                raise ValueError(growid_response.error)
-
-            growid = growid_response.data
-
-            # Verify balance
-            balance_response = await self.balance_service.get_balance(growid)
-            if not balance_response.success:
-                raise ValueError(balance_response.error)
-
-            balance = balance_response.data
-            if not balance:
-                raise ValueError(MESSAGES.ERROR['BALANCE_NOT_FOUND'])
-
-            balance_wls = balance.total_wl()
-            if balance_wls < self.total_price:
-                raise ValueError(MESSAGES.ERROR['INSUFFICIENT_BALANCE'])
-
-            # Process purchase
-            purchase_response = await self.trx_manager.process_purchase(
-                user_id=growid,  # Ubah growid menjadi user_id
-                product_code=self.product['code'],
-                quantity=self.quantity,
-                price=self.total_price
-            )
-
-            if not purchase_response.success:
-                raise ValueError(purchase_response.error)
-
-            # Disable buttons
-            for child in self.children:
-                child.disabled = True
-            await interaction.message.edit(view=self)
-
-            # Send success message
-            success_embed = discord.Embed(
-                title="✅ Pembelian Berhasil",
-                color=COLORS.SUCCESS
-            )
-
-            success_embed.add_field(
-                name="Detail Pembelian",
-                value=(
-                    f"```yml\n"
-                    f"Produk   : {self.product['name']}\n"
-                    f"Jumlah   : {self.quantity}x\n"
-                    f"Total    : {self.total_price} WL\n"
-                    f"GrowID   : {growid}\n"
-                    "```"
-                ),
-                inline=False
-            )
-
-            await interaction.followup.send(embed=success_embed, ephemeral=True)
-
-        except ValueError as e:
-            error_embed = discord.Embed(
-                title="❌ Error",
-                description=str(e),
-                color=COLORS.ERROR
-            )
-            await interaction.followup.send(embed=error_embed, ephemeral=True)
-
-    @discord.ui.button(
-        label="❌ Batal", 
-        style=discord.ButtonStyle.danger
-    )
-    async def cancel(self, interaction: discord.Interaction, button: Button):
-        try:
-            await interaction.response.defer(ephemeral=True)
-            
-            # Disable semua tombol
-            for child in self.children:
-                child.disabled = True
-            
-            # Update view dengan safe handling
-            try:
-                await interaction.message.edit(view=self)
-            except discord.NotFound:
-                pass  # Abaikan jika pesan sudah tidak ada
-            except Exception as e:
-                self.logger.error(f"Error updating view: {e}")
-            
-            # Kirim pesan pembatalan
-            await interaction.followup.send(
-                embed=discord.Embed(
-                    title="❌ Dibatalkan",
-                    description="Pembelian dibatalkan",
-                    color=COLORS.ERROR
-                ),
-                ephemeral=True
-            )
-        except Exception as e:
-            self.logger.error(f"Error in cancel callback: {e}")
-            try:
-                await interaction.followup.send(
-                    embed=discord.Embed(
-                        title="❌ Error",
-                        description="Terjadi kesalahan saat membatalkan pembelian",
-                        color=COLORS.ERROR
-                    ),
-                    ephemeral=True
-                )
-            except:
-                pass
-
 
 class ProductSelect(Select):
     def __init__(self, products: List[Dict], balance_service, product_service, trx_manager, bot):
@@ -716,109 +591,188 @@ class ShopView(View):
         finally:
             self._release_interaction_lock(str(interaction.id))
 
+
+
     @discord.ui.button(
         style=discord.ButtonStyle.success,
         label="🛒 Beli",
         custom_id=BUTTON_IDS.BUY
     )
     async def buy_callback(self, interaction: discord.Interaction, button: Button):
-        if not await self._acquire_interaction_lock(str(interaction.id)):
-            await interaction.response.send_message(
-                embed=discord.Embed(
-                    title="⏳ Mohon Tunggu",
-                    description=MESSAGES.INFO['COOLDOWN'],
-                    color=COLORS.WARNING
-                ),
-                ephemeral=True
-            )
-            return
-
         try:
+            # Defer response segera untuk menghindari timeout
             await interaction.response.defer(ephemeral=True)
+            
+            # Initialize services
+            balance_service = BalanceManagerService(self.bot)
+            product_service = ProductManagerService(self.bot)
+            admin_service = AdminService(self.bot)
 
             # Check maintenance mode
-            if await self.admin_service.is_maintenance_mode():
-                raise ValueError(MESSAGES.INFO['MAINTENANCE'])
+            if await admin_service.is_maintenance_mode():
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="🔧 Maintenance",
+                        description=MESSAGES.INFO['MAINTENANCE'],
+                        color=COLORS.WARNING
+                    ),
+                    ephemeral=True
+                )
+                return
 
-            growid_response = await self.balance_service.get_growid(str(interaction.user.id))
+            # Get user's GrowID
+            growid_response = await balance_service.get_growid(str(interaction.user.id))
             if not growid_response.success:
-                raise ValueError(growid_response.error)
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="❌ Error",
+                        description="Silakan daftar terlebih dahulu menggunakan tombol '📝 Daftar'",
+                        color=COLORS.ERROR
+                    ),
+                    ephemeral=True
+                )
+                return
 
-            growid = growid_response.data
-            if not growid:
-                raise ValueError(MESSAGES.ERROR['NOT_REGISTERED'])
+            # Get available products
+            product_response = await product_service.get_all_products()
+            if not product_response.success or not product_response.data:
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="❌ Error",
+                        description="Tidak ada produk yang tersedia saat ini",
+                        color=COLORS.ERROR
+                    ),
+                    ephemeral=True
+                )
+                return
 
-            # Get products with proper response handling
-            product_response = await self.product_service.get_all_products()
-            if not product_response.success:
-                raise ValueError(product_response.error)
-
-            products = product_response.data
+            # Filter available products
             available_products = []
-
-            for product in products:
-                stock_response = await self.product_service.get_stock_count(product['code'])
+            for product in product_response.data:
+                stock_response = await product_service.get_stock_count(product['code'])
                 if stock_response.success and stock_response.data > 0:
                     product['stock'] = stock_response.data
                     available_products.append(product)
 
             if not available_products:
-                raise ValueError(MESSAGES.ERROR['OUT_OF_STOCK'])
+                await interaction.followup.send(
+                    embed=discord.Embed(
+                        title="❌ Stok Kosong",
+                        description="Maaf, semua produk sedang kosong",
+                        color=COLORS.ERROR
+                    ),
+                    ephemeral=True
+                )
+                return
 
+            # Create product selection view
+            select_view = View(timeout=60)  # Timeout lebih singkat
+            
+            # Add product select menu
+            product_select = Select(
+                placeholder="Pilih produk yang ingin dibeli...",
+                options=[
+                    discord.SelectOption(
+                        label=f"{product['name']}",
+                        description=f"Stok: {product['stock']} | Harga: {product['price']} WL",
+                        value=product['code'],
+                        emoji="🛍️"
+                    ) for product in available_products[:25]  # Discord limit 25 options
+                ]
+            )
+
+            async def select_callback(select_interaction: discord.Interaction):
+                try:
+                    product_code = product_select.values[0]
+                    selected_product = next(
+                        (p for p in available_products if p['code'] == product_code),
+                        None
+                    )
+
+                    if not selected_product:
+                        await select_interaction.response.send_message(
+                            embed=discord.Embed(
+                                title="❌ Error",
+                                description="Produk tidak ditemukan",
+                                color=COLORS.ERROR
+                            ),
+                            ephemeral=True
+                        )
+                        return
+
+                    # Show quantity input modal
+                    modal = PurchaseQuantityModal(
+                        selected_product,
+                        min(selected_product['stock'], 999),
+                        self.bot
+                    )
+                    await select_interaction.response.send_modal(modal)
+
+                except Exception as e:
+                    self.logger.error(f"Error in select callback: {e}")
+                    if not select_interaction.response.is_done():
+                        await select_interaction.response.send_message(
+                            embed=discord.Embed(
+                                title="❌ Error",
+                                description="Terjadi kesalahan saat memilih produk",
+                                color=COLORS.ERROR
+                            ),
+                            ephemeral=True
+                        )
+
+            product_select.callback = select_callback
+            select_view.add_item(product_select)
+
+            # Create and send product list embed
             embed = discord.Embed(
                 title="🏪 Daftar Produk",
-                description=(
-                    "```yml\n"
-                    "Pilih produk dari menu di bawah untuk membeli\n"
-                    "```"
-                ),
+                description="Silakan pilih produk dari menu di bawah",
                 color=COLORS.INFO
             )
 
             for product in available_products:
-                price = float(product['price'])
-                price_display = self._format_currency(price)
-
                 embed.add_field(
-                    name=f"{product['name']} [{product['code']}]",
+                    name=f"{product['name']}",
                     value=(
-                        f"```yml\n"
-                        f"Harga: {price_display}\n"
+                        f"```\n"
+                        f"Kode: {product['code']}\n"
+                        f"Harga: {product['price']} WL\n"
                         f"Stok: {product['stock']} unit\n"
-                        f"```"
-                        f"{product.get('description', '')}"
+                        "```"
                     ),
                     inline=True
                 )
 
-            view = View(timeout=300)
-            view.add_item(ProductSelect(
-                available_products,
-                self.balance_service,
-                self.product_service,
-                self.trx_manager,
-                self.bot  # Tambahkan self.bot
-            ))
-
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
-
-        except ValueError as e:
-            error_embed = discord.Embed(
-                title="❌ Error",
-                description=str(e),
-                color=COLORS.ERROR
+            await interaction.followup.send(
+                embed=embed,
+                view=select_view,
+                ephemeral=True
             )
-            await interaction.followup.send(embed=error_embed, ephemeral=True)
+
         except Exception as e:
             self.logger.error(f"Error in buy callback: {e}")
-            error_embed = discord.Embed(
-                title="❌ Error",
-                description=MESSAGES.ERROR['TRANSACTION_FAILED'],
-                color=COLORS.ERROR
-            )
-            await interaction.followup.send(embed=error_embed, ephemeral=True)
-        finally:
-            self._release_interaction_lock(str(interaction.id))
+            if not interaction.response.is_done():
+                try:
+                    await interaction.response.send_message(
+                        embed=discord.Embed(
+                            title="❌ Error",
+                            description="Terjadi kesalahan sistem",
+                            color=COLORS.ERROR
+                        ),
+                        ephemeral=True
+                    )
+                except:
+                    try:
+                        await interaction.followup.send(
+                            embed=discord.Embed(
+                                title="❌ Error",
+                                description="Terjadi kesalahan sistem",
+                                color=COLORS.ERROR
+                            ),
+                            ephemeral=True
+                        )
+                    except:
+                        pass  # Jika semua upaya gagal
 
     @discord.ui.button(
         style=discord.ButtonStyle.secondary,
