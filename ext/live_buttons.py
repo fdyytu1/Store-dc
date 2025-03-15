@@ -43,15 +43,15 @@ from .trx import TransactionManager
 from .admin_service import AdminService
 
 # Tambahkan class baru
-class PurchaseModal(discord.ui.Modal, title="🛍️ Pembelian Produk"):
+class PurchaseModal(discord.ui.Modal):
     def __init__(self, products: List[Dict], balance_service, product_service, trx_manager):
-        super().__init__(timeout=None)
+        super().__init__(title="🛍️ Pembelian Produk")
         self.products_cache = {p['code']: p for p in products}
         self.balance_service = balance_service
         self.product_service = product_service
         self.trx_manager = trx_manager
 
-        # Format product options untuk ditampilkan
+        # Format product list untuk ditampilkan
         product_list = "\n".join([
             f"{p['name']} ({p['code']}) - {p['price']} WL | Stok: {p['stock']}"
             for p in products
@@ -61,7 +61,8 @@ class PurchaseModal(discord.ui.Modal, title="🛍️ Pembelian Produk"):
             label="Daftar Produk (Kode dalam kurung)",
             style=discord.TextStyle.paragraph,
             default=product_list,
-            required=False
+            required=False,
+            custom_id="product_info"
         )
 
         self.product_code = discord.ui.TextInput(
@@ -70,7 +71,8 @@ class PurchaseModal(discord.ui.Modal, title="🛍️ Pembelian Produk"):
             placeholder="Masukkan kode produk yang ingin dibeli",
             required=True,
             min_length=1,
-            max_length=10
+            max_length=10,
+            custom_id="product_code"
         )
 
         self.quantity = discord.ui.TextInput(
@@ -79,7 +81,8 @@ class PurchaseModal(discord.ui.Modal, title="🛍️ Pembelian Produk"):
             placeholder="Masukkan jumlah yang ingin dibeli",
             required=True,
             min_length=1,
-            max_length=3
+            max_length=3,
+            custom_id="quantity"
         )
 
         self.add_item(self.product_info)
@@ -87,62 +90,69 @@ class PurchaseModal(discord.ui.Modal, title="🛍️ Pembelian Produk"):
         self.add_item(self.quantity)
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         try:
             # Get dan validasi input
             product_code = self.product_code.value.strip().upper()
             quantity = int(self.quantity.value)
-
+    
             # Validasi produk
             if product_code not in self.products_cache:
-                await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="❌ Error",
-                        description=f"Produk dengan kode '{product_code}' tidak ditemukan",
-                        color=COLORS.ERROR
-                    ),
-                    ephemeral=True
-                )
-                return
-
+                raise ValueError(f"Produk dengan kode '{product_code}' tidak ditemukan")
+            
             selected_product = self.products_cache[product_code]
-
+    
+            # Validasi stok
+            stock_response = await self.product_service.get_stock_count(product_code)
+            if not stock_response.success:
+                raise ValueError(stock_response.error)
+    
+            current_stock = stock_response.data
+            if current_stock <= 0:
+                raise ValueError(MESSAGES.ERROR['OUT_OF_STOCK'])
+            
+            if quantity <= 0 or quantity > current_stock:
+                raise ValueError(MESSAGES.ERROR['INVALID_AMOUNT'])
+    
             # Proses pembelian
             purchase_response = await self.trx_manager.process_purchase(
                 buyer_id=str(interaction.user.id),
                 product_code=product_code,
                 quantity=quantity
             )
-
-            if 'error' in purchase_response:
-                await interaction.response.send_message(
-                    embed=discord.Embed(
-                        title="❌ Error",
-                        description=purchase_response['error'],
-                        color=COLORS.ERROR
-                    ),
-                    ephemeral=True
-                )
-                return
-
+    
+            # Cek response berhasil atau tidak
+            if not purchase_response.success:
+                raise ValueError(purchase_response.error)
+    
             # Format pesan sukses
             embed = discord.Embed(
                 title="✅ Pembelian Berhasil",
-                description=purchase_response['message'],
+                description=purchase_response.message,
                 color=COLORS.SUCCESS
             )
-
-            if 'data' in purchase_response:
-                data = purchase_response['data']
+    
+            # Tambah detail produk jika ada
+            if purchase_response.data and 'content' in purchase_response.data:
+                content_text = "\n".join(purchase_response.data['content'])
                 embed.add_field(
-                    name="Detail Pembelian",
-                    value=f"```\nProduk: {data['product']['name']}\nJumlah: {data['quantity']}x\nTotal: {data['total_price']} WL\n```",
+                    name="Detail Produk",
+                    value=f"```\n{content_text}\n```",
                     inline=False
                 )
-
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-
+    
+            # Tambah info tambahan
+            if purchase_response.balance_response and purchase_response.balance_response.data:
+                embed.add_field(
+                    name="Saldo Baru",
+                    value=f"```\n{purchase_response.balance_response.data.format()}\n```",
+                    inline=False
+                )
+    
+            await interaction.followup.send(embed=embed, ephemeral=True)
+    
         except ValueError as e:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=discord.Embed(
                     title="❌ Error",
                     description=str(e),
@@ -151,7 +161,7 @@ class PurchaseModal(discord.ui.Modal, title="🛍️ Pembelian Produk"):
                 ephemeral=True
             )
         except Exception as e:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 embed=discord.Embed(
                     title="❌ Error",
                     description=MESSAGES.ERROR['TRANSACTION_FAILED'],
@@ -555,6 +565,17 @@ class ShopView(View):
         custom_id=BUTTON_IDS.BUY
     )
     async def buy_callback(self, interaction: discord.Interaction, button: Button):
+        if not await self._acquire_interaction_lock(str(interaction.id)):
+            await interaction.response.send_message(
+                embed=discord.Embed(
+                    title="⏳ Mohon Tunggu",
+                    description=MESSAGES.INFO['COOLDOWN'],
+                    color=COLORS.WARNING
+                ),
+                ephemeral=True
+            )
+            return
+    
         try:
             # Check maintenance mode
             if await self.admin_service.is_maintenance_mode():
@@ -583,21 +604,19 @@ class ShopView(View):
     
             # Get available products
             product_response = await self.product_service.get_all_products()
-            if not product_response.success:
+            if not product_response.success or not product_response.data:
                 await interaction.response.send_message(
                     embed=discord.Embed(
                         title="❌ Error",
-                        description=product_response.error,
+                        description=MESSAGES.ERROR['OUT_OF_STOCK'],
                         color=COLORS.ERROR
                     ),
                     ephemeral=True
                 )
                 return
     
-            products = product_response.data
             available_products = []
-    
-            for product in products:
+            for product in product_response.data:
                 stock_response = await self.product_service.get_stock_count(product['code'])
                 if stock_response.success and stock_response.data > 0:
                     product['stock'] = stock_response.data
@@ -621,7 +640,6 @@ class ShopView(View):
                 self.product_service,
                 self.trx_manager
             )
-            
             await interaction.response.send_modal(modal)
     
         except Exception as e:
@@ -638,7 +656,9 @@ class ShopView(View):
                     )
                 except:
                     pass
-
+        finally:
+            self._release_interaction_lock(str(interaction.id))
+            
     @discord.ui.button(
         style=discord.ButtonStyle.secondary,
         label="📜 Riwayat",
