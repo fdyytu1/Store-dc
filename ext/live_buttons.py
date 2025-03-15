@@ -49,9 +49,10 @@ class PurchaseQuantityModal(Modal):
         self.max_quantity = max_quantity
         self.bot = bot
 
+        # Tambahkan field input jumlah dengan pesan yang lebih jelas
         self.quantity = TextInput(
-            label="Jumlah yang ingin dibeli",
-            placeholder=f"Maksimal {max_quantity}",
+            label="Masukkan Jumlah",
+            placeholder=f"1 - {max_quantity}",
             min_length=1,
             max_length=3,
             required=True
@@ -60,32 +61,100 @@ class PurchaseQuantityModal(Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
+            # Validasi input
             quantity = int(self.quantity.value)
             if quantity <= 0 or quantity > self.max_quantity:
-                raise ValueError(MESSAGES.ERROR['INVALID_AMOUNT'])
+                raise ValueError(f"Jumlah harus antara 1 dan {self.max_quantity}")
 
-            # Tampilkan konfirmasi pembelian
-            embed = discord.Embed(
-                title="🛒 Konfirmasi Pembelian",
-                color=COLORS.INFO
-            )
-
+            # Hitung total harga
             total_price = float(self.product['price']) * quantity
             
-            embed.add_field(
-                name="Detail Pesanan",
-                value=(
-                    f"```yml\n"
-                    f"Produk: {self.product['name']}\n"
-                    f"Jumlah: {quantity}x\n"
-                    f"Harga Satuan: {self.product['price']} WL\n"
-                    f"Total Harga: {total_price} WL\n"
-                    "```"
+            # Buat pesan konfirmasi yang lebih sederhana
+            embed = discord.Embed(
+                title="🛒 Konfirmasi Pembelian",
+                description=(
+                    f"**{self.product['name']}**\n"
+                    f"Jumlah: **{quantity}x**\n"
+                    f"Total: **{total_price} WL**\n\n"
+                    "Klik tombol di bawah untuk melanjutkan"
                 ),
-                inline=False
+                color=discord.Color.green()
             )
 
-            view = PurchaseConfirmationView(self.product, quantity, total_price, self.bot)
+            # Tombol konfirmasi yang lebih sederhana
+            view = View(timeout=60)  # Timeout lebih singkat
+            
+            # Tombol Konfirmasi
+            confirm_button = Button(
+                style=discord.ButtonStyle.success,
+                label="✅ Konfirmasi",
+                custom_id="confirm_purchase"
+            )
+            
+            # Tombol Batal
+            cancel_button = Button(
+                style=discord.ButtonStyle.danger,
+                label="❌ Batal",
+                custom_id="cancel_purchase"
+            )
+
+            async def confirm_callback(interaction: discord.Interaction):
+                try:
+                    # Proses pembelian
+                    trx_manager = TransactionManager(self.bot)
+                    purchase_response = await trx_manager.process_purchase(
+                        buyer_id=str(interaction.user.id),
+                        product_code=self.product['code'],
+                        quantity=quantity
+                    )
+
+                    if purchase_response.success:
+                        # Pesan sukses yang lebih sederhana
+                        success_embed = discord.Embed(
+                            title="✅ Pembelian Berhasil",
+                            description=(
+                                f"**{self.product['name']}** x{quantity}\n"
+                                f"Total: {total_price} WL\n\n"
+                                "Silakan cek inventory Anda"
+                            ),
+                            color=discord.Color.green()
+                        )
+                        await interaction.response.edit_message(embed=success_embed, view=None)
+                    else:
+                        # Pesan error yang lebih jelas
+                        error_embed = discord.Embed(
+                            title="❌ Gagal",
+                            description=purchase_response.error or "Terjadi kesalahan",
+                            color=discord.Color.red()
+                        )
+                        await interaction.response.edit_message(embed=error_embed, view=None)
+
+                except Exception as e:
+                    await interaction.response.edit_message(
+                        embed=discord.Embed(
+                            title="❌ Error",
+                            description="Terjadi kesalahan sistem",
+                            color=discord.Color.red()
+                        ),
+                        view=None
+                    )
+
+            async def cancel_callback(interaction: discord.Interaction):
+                await interaction.response.edit_message(
+                    embed=discord.Embed(
+                        title="❌ Dibatalkan",
+                        description="Pembelian dibatalkan",
+                        color=discord.Color.red()
+                    ),
+                    view=None
+                )
+
+            confirm_button.callback = confirm_callback
+            cancel_button.callback = cancel_callback
+            
+            view.add_item(confirm_button)
+            view.add_item(cancel_button)
+            
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
         except ValueError as e:
@@ -93,11 +162,11 @@ class PurchaseQuantityModal(Modal):
                 embed=discord.Embed(
                     title="❌ Error",
                     description=str(e),
-                    color=COLORS.ERROR
+                    color=discord.Color.red()
                 ),
                 ephemeral=True
             )
-
+            
 class PurchaseConfirmationView(View):
     def __init__(self, product: Dict, quantity: int, total_price: float, bot):
         super().__init__(timeout=300)  # 5 menit timeout
